@@ -1,0 +1,8 @@
+bin
+Debug
+build
+*.bak
+*.old
+Obj
+.vs
+.vscode
