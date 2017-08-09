@@ -119,10 +119,10 @@ freertos::future<esp_err_t> GattClientCharacteristic::enable_notification_async(
 	esp_gatt_status_t result;
 	this->enable_notification_promise.reset();
 	if (enable) {
-		result = esp_ble_gattc_register_for_notify(gattc_if, bda.value, &service_id, &this->id);
+		result = (esp_gatt_status_t)esp_ble_gattc_register_for_notify(gattc_if, bda.value, &service_id, &this->id);
 	}
 	else {
-		result = esp_ble_gattc_unregister_for_notify(gattc_if, bda.value, &service_id, &this->id);
+		result = (esp_gatt_status_t)esp_ble_gattc_unregister_for_notify(gattc_if, bda.value, &service_id, &this->id);
 	}
 	if (result != ESP_GATT_OK) {
 		this->enable_notification_promise.set_value(result);

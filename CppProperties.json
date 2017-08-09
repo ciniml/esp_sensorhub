@@ -1,0 +1,39 @@
+{
+  "projectName": "esp_sensorhub",
+  "environments": [
+    {
+      "MSYS_PREFIX": "C:/msys64",
+      "MSYSTEM": "MINGW64",
+      "MSYSTEM_CARCH": "X86_64",
+      "MSYSTEM_PREFIX": "${env.MSYS_PREFIX}",
+      "MINGW_PREFIX": "${MSYS_PREFIX}/mingw64",
+      "MINGW_CHOST": "x86_64-w64-mingw32",
+      "MINGW_PACKAGE_PREFIX": "mingw_w64_x86_64",
+      "IDF_PATH": "C:/dev/esp-idf",
+      "XTENSA_PREFIX": "${env.MSYS_PREFIX}/opt/xtensa-esp32-elf/xtensa-esp32-elf",
+      "SHELL": "${env.MSYS_PREFIX}/usr/bin/bash",
+      "TEMP": "${env.MSYS_PREFIX}/tmp",
+      "PATH": "${env.MSYS_PREFIX}/usr/bin:${env.XTENSA_PREFIX}/bin",
+      "INCLUDE": "${env.XTENSA_PREFIX}/include"
+    }
+  ],
+  "configurations": [
+    {
+      "name": "ESP32",
+      "includePath": [
+        "${env.INCLUDE}",
+        "${env.INCLUDE}/c++/5.2.0",
+        "${env.IDF_PATH}/components/esp32/include",
+        "${env.IDF_PATH}/components/freertos/include",
+        "${env.IDF_PATH}/components/spi_flash/include",
+        "${env.IDF_PATH}/components/log/include",
+        "${env.IDF_PATH}/components/bt/include",
+        "${env.IDF_PATH}/components/bt/bluedroid/include",
+        "${env.IDF_PATH}/components/bt/bluedroid/api/include",
+        "${workspaceRoot}/build/include"
+      ],
+      "intelliSenseMode": "android-clang-arm"
+    }
+  ]
+
+}

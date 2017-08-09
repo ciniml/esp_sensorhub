@@ -68,14 +68,27 @@
   <PropertyGroup Label="UserMacros" />
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <LocalRemoteCopySources>false</LocalRemoteCopySources>
-    <NMakeIncludeSearchPath>C:\dev\esp-idf\components\log\include;C:\dev\esp-idf\components\bt\bluedroid\include;C:\dev\esp-idf\components\bt\bluedroid\api\include;C:\dev\esp-idf\components\spi_flash\include;C:\dev\esp-idf\components\freertos\include;C:\dev\esp-idf\components\bt\include;C:\dev\esp-idf\components\esp32\include;C:\msys64\opt\xtensa-esp32-elf\xtensa-esp32-elf\include;$(ProjectDir)build;$(ProjectDir)build\include</NMakeIncludeSearchPath>
+    <NMakeIncludeSearchPath>C:\dev\esp-idf\components\nghttp\port\include;C:\dev\esp-idf\components\lwip\include\lwip;C:\dev\esp-idf\components\lwip\include;C:\dev\esp-idf\components\mbedtls\port\include;C:\dev\esp-idf\components\mbedtls\include;C:\dev\esp-idf\components\log\include;C:\dev\esp-idf\components\bt\bluedroid\include;C:\dev\esp-idf\components\bt\bluedroid\api\include;C:\dev\esp-idf\components\spi_flash\include;C:\dev\esp-idf\components\freertos\include;C:\dev\esp-idf\components\bt\include;C:\dev\esp-idf\components\esp32\include;C:\msys64\opt\xtensa-esp32-elf\xtensa-esp32-elf\include;$(ProjectDir)build;$(ProjectDir)build\include</NMakeIncludeSearchPath>
+    <AdditionalOptions>
+    </AdditionalOptions>
+    <NMakePreprocessorDefinitions>
+    </NMakePreprocessorDefinitions>
   </PropertyGroup>
   <ItemGroup>
+    <ClCompile Include="main\bluetooth_util.cpp" />
+    <ClCompile Include="main\http_client.cpp" />
     <ClCompile Include="main\sensor_hub.cpp" />
+    <ClCompile Include="main\tls_client.cpp" />
   </ItemGroup>
   <ItemGroup>
     <None Include="Makefile" />
     <None Include="sdkconfig" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="main\bluetooth_util.hpp" />
+    <ClInclude Include="main\freertos_future.hpp" />
+    <ClInclude Include="main\http_client.hpp" />
+    <ClInclude Include="main\tls_client.hpp" />
   </ItemGroup>
   <ItemDefinitionGroup />
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
