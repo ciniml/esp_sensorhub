@@ -64,15 +64,36 @@
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
   <ImportGroup Label="ExtensionSettings" />
   <ImportGroup Label="Shared" />
-  <ImportGroup Label="PropertySheets" />
+  <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Debug|ARM'">
+    <Import Project="esp_idf.props" />
+  </ImportGroup>
+  <ImportGroup Label="PropertySheets" Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+    <Import Project="esp_idf.props" />
+  </ImportGroup>
   <PropertyGroup Label="UserMacros" />
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <LocalRemoteCopySources>false</LocalRemoteCopySources>
-    <NMakeIncludeSearchPath>C:\dev\esp-idf\components\nghttp\port\include;C:\dev\esp-idf\components\lwip\include\lwip;C:\dev\esp-idf\components\lwip\include;C:\dev\esp-idf\components\mbedtls\port\include;C:\dev\esp-idf\components\mbedtls\include;C:\dev\esp-idf\components\log\include;C:\dev\esp-idf\components\bt\bluedroid\include;C:\dev\esp-idf\components\bt\bluedroid\api\include;C:\dev\esp-idf\components\spi_flash\include;C:\dev\esp-idf\components\freertos\include;C:\dev\esp-idf\components\bt\include;C:\dev\esp-idf\components\esp32\include;C:\msys64\opt\xtensa-esp32-elf\xtensa-esp32-elf\include;$(ProjectDir)build;$(ProjectDir)build\include</NMakeIncludeSearchPath>
+    <NMakeIncludeSearchPath>$(IDF_COMPONENTS_ROOT)\nghttp\port\include;$(IDF_COMPONENTS_ROOT)\lwip\include\lwip;$(IDF_COMPONENTS_ROOT)\lwip\include;$(IDF_COMPONENTS_ROOT)\mbedtls\port\include;$(IDF_COMPONENTS_ROOT)\mbedtls\include;$(IDF_COMPONENTS_ROOT)\log\include;$(IDF_COMPONENTS_ROOT)\bt\bluedroid\include;$(IDF_COMPONENTS_ROOT)\bt\bluedroid\api\include;$(IDF_COMPONENTS_ROOT)\spi_flash\include;$(IDF_COMPONENTS_ROOT)\freertos\include;$(IDF_COMPONENTS_ROOT)\bt\include;$(IDF_COMPONENTS_ROOT)\esp32\include;$(XTENSA_CXX_BITS_INCLUDE);$(XTENSA_CXX_INCLUDE);$(XTENSA_C_INCLUDE);$(ProjectDir)build;$(ProjectDir)build\include</NMakeIncludeSearchPath>
     <AdditionalOptions>
     </AdditionalOptions>
     <NMakePreprocessorDefinitions>
     </NMakePreprocessorDefinitions>
+    <IncludePath>$(XTENSA_TOOLCHAIN)\;$(IDF_PATH)\components\esp32\include;$(IncludePath)</IncludePath>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|ARM'">
+    <IncludePath>$(XTENSA_CXX_BITS_INCLUDE);$(XTENSA_CXX_INCLUDE);$(XTENSA_C_INCLUDE);$(IDF_COMPONENTS_ROOT)\esp32\include;$(IDF_COMPONENTS_ROOT)\bt\bluedroid\api\include;$(IDF_COMPONENTS_ROOT)\bt\include;$(IDF_COMPONENTS_ROOT)\driver\include;$(IDF_COMPONENTS_ROOT)\freertos\include;$(IDF_COMPONENTS_ROOT)\mbedtls\include;$(IDF_COMPONENTS_ROOT)\nghttp\include;$(IDF_COMPONENTS_ROOT)\nvs_flash\include;$(IDF_COMPONENTS_ROOT)\soc\esp32\include;$(IDF_COMPONENTS_ROOT)\spi_flash\include;$(IDF_COMPONENTS_ROOT)\log\include;$(IncludePath)</IncludePath>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|ARM'">
+    <IncludePath>$(XTENSA_TOOLCHAIN)\;$(IDF_PATH)\components\esp32\include;$(IncludePath)</IncludePath>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <IncludePath>$(XTENSA_TOOLCHAIN)\;$(IDF_PATH)\components\esp32\include;$(IncludePath)</IncludePath>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x86'">
+    <IncludePath>$(XTENSA_TOOLCHAIN)\;$(IDF_PATH)\components\esp32\include;$(IncludePath)</IncludePath>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x86'">
+    <IncludePath>$(XTENSA_TOOLCHAIN)\;$(IDF_PATH)\components\esp32\include;$(IncludePath)</IncludePath>
   </PropertyGroup>
   <ItemGroup>
     <ClCompile Include="main\bluetooth_util.cpp" />
@@ -81,6 +102,7 @@
     <ClCompile Include="main\tls_client.cpp" />
   </ItemGroup>
   <ItemGroup>
+    <None Include="esp_idf.props" />
     <None Include="Makefile" />
     <None Include="sdkconfig" />
   </ItemGroup>

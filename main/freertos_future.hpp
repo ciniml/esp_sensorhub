@@ -8,6 +8,7 @@
 #include "freertos/task.h"
 #include "freertos/semphr.h"
 #include "freertos/event_groups.h"
+#include "freertos/queue.h"
 
 namespace freertos
 {
@@ -65,11 +66,62 @@ namespace freertos
 		{
 			xEventGroupSetBits(this->handle.get(), 1);
 		}
-		void wait()
+		void wait(bool clear_on_exit=false)
 		{
-			xEventGroupWaitBits(this->handle.get(), 1, pdFALSE, pdTRUE, portMAX_DELAY);
+			xEventGroupWaitBits(this->handle.get(), 1, clear_on_exit ? pdTRUE : pdFALSE, pdTRUE, portMAX_DELAY);
 		}
 		bool is_valid() const { return this->handle.operator bool(); }
+	};
+
+	template<typename TItem, std::size_t TLength>
+	struct WaitQueueStorage
+	{
+		std::uint8_t body[TLength*sizeof(TItem)];
+	};
+	template<typename TItem>
+	struct WaitQueueStorage<TItem, 0>
+	{
+	};
+
+	template<typename TItem, std::size_t TLength>
+	class WaitQueue
+	{
+	private:
+		typedef std::unique_ptr< std::remove_pointer<QueueHandle_t>::type, decltype(&vQueueDelete) > HandleType;
+		HandleType handle;
+		WaitQueueStorage<TItem, TLength> storage;
+		StaticQueue_t queue;
+	public:
+
+		WaitQueue() : handle(nullptr, &vQueueDelete)
+		{
+			this->handle.reset(xQueueCreateStatic(TLength, sizeof(TItem), this->storage.body, &this->queue));
+		}
+		void reset()
+		{
+			xQueueReset(this->handle.get());
+		}
+		std::size_t get_number_of_items()
+		{
+			return uxQueueMessagesWaiting(this->handle.get());
+		}
+		std::size_t get_free_spaces()
+		{
+			return uxQueueSpacesAvailable(this->handle.get());
+		}
+		bool is_full()
+		{
+			return this->get_free_spaces() != 0;
+		}
+
+		bool send(const TItem& item)
+		{
+			return xQueueSend(this->handle.get(), &item, portMAX_DELAY) == pdTRUE;
+		}
+		bool receive(TItem& received_item)
+		{
+			return xQueueReceive(this->handle.get(), &received_item, portMAX_DELAY) == pdTRUE;
+		}
 	};
 
 	template<typename TLock>

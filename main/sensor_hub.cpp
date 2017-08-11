@@ -1,4 +1,5 @@
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <cstdint>
 #include <memory>
@@ -28,8 +29,6 @@
 #include "http_client.hpp"
 
 static const BluetoothUuid target_uuid("F0000000-0451-4000-B000-000000000000");
-
-
 
 using namespace std;
 static const char* TAG = "SENSORHUB";
@@ -63,6 +62,7 @@ static shared_ptr<GattClientService> temperature_service;
 static const BluetoothUuid TemperatureServiceUuid("F000AA00-0451-4000-B000-000000000000");
 static const BluetoothUuid TemperatureDataCharacteristicUuid("F000AA01-0451-4000-B000-000000000000");
 static const BluetoothUuid TemperatureConfigurationCharacteristicUuid("F000AA02-0451-4000-B000-000000000000");
+static const BluetoothUuid TemperaturePeriodCharacteristicUuid("F000AA03-0451-4000-B000-000000000000");
 static const BluetoothUuid NotificationDescriptorUuid(static_cast<uint16_t>(0x2902u), true);
 
 static void handle_gap_event(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *param)
@@ -106,6 +106,32 @@ static TlsClient tls_client;
 static HttpClient http_client(tls_client);
 static std::unique_ptr<freertos::WaitEvent> event_wifi_got_ip;
 
+class ResponseReceiver : public IHttpResponseReceiver
+{
+private:
+	bool is_success;
+
+	virtual int on_message_begin(const HttpClient&) { ESP_LOGI(TAG, "Message begin"); return 0; }
+	virtual int on_message_complete(const HttpClient&) { ESP_LOGI(TAG, "Message end"); return 0; }
+	virtual int on_header_complete(const HttpClient&, const HttpResponseInfo& info) { 
+		ESP_LOGI(TAG, "Header end. status code = %d", info.status_code); 
+		ESP_LOGI(TAG, "Content-length = 0x%x", info.content_length);
+		this->is_success = info.status_code == 200;	// Check status code to determinse the request has been completed successfully or not.
+		return 0; 
+	}
+	virtual int on_header(const HttpClient&, const std::string& name, const std::string& value) {
+		ESP_LOGI(TAG, "%s: %s", name.c_str(), value.c_str());
+		return 0; 
+	}
+	virtual int on_body(const HttpClient&, const std::uint8_t* buffer, std::size_t length) {
+		ESP_LOGI(TAG, "on_body: addr=%p, len=0x%x", buffer, length);
+		return 0; 
+	}
+public:
+	ResponseReceiver() : is_success(false) {}
+
+	bool get_is_success() const { return this->is_success; }
+};
 esp_err_t wifi_event_handler(void* ctx, system_event_t* event) 
 {
 	switch (event->event_id)
@@ -132,21 +158,23 @@ static void initialize_wifi()
 	ESP_ERROR_CHECK(esp_wifi_set_storage(WIFI_STORAGE_RAM));
 	ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
 	wifi_config_t wifi_config = { 0 };
-	strcpy(reinterpret_cast<char*>(wifi_config.sta.ssid), "starbase");
-	strcpy(reinterpret_cast<char*>(wifi_config.sta.password), "hogeFugapiyo");
+	strcpy(reinterpret_cast<char*>(wifi_config.sta.ssid), "defiant");
+	strcpy(reinterpret_cast<char*>(wifi_config.sta.password), "hogefugapiyo");
 	wifi_config.sta.bssid_set = false;
 	ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
 	ESP_ERROR_CHECK(esp_wifi_start());
 	ESP_ERROR_CHECK(esp_wifi_connect());
 
 	event_wifi_got_ip->wait();
-
-	std::stringstream ss;
-	if (http_client.get("esp32functiontest.azurewebsites.net", "443", "/api/HttpTriggerCSharp1?code=vICHv/UvPxv4SlwHcp78rPlKK8Cm6Fz47GpbwtpCbjoa2zpa/A3LRw==&name=ESP32", ss)) {
-		puts(ss.str().c_str());
-	}
 }
 
+struct SensorData
+{
+	float objective;
+	float ambient;
+};
+
+freertos::WaitQueue<SensorData, 8> sensor_data_queue;
 
 extern "C" void app_main();
 
@@ -216,18 +244,28 @@ void app_main()
 		ESP_LOGI(TAG, "Writing value complete. status=%x", result);
 	}
 	{
+		ESP_LOGI(TAG, "Writing Period characteristic");
+		auto characteristic = temperature_service->get_characteristic(TemperaturePeriodCharacteristicUuid);
+		uint8_t value = 200;
+		auto result = characteristic->write_value_async(&value, 1).get();
+		ESP_LOGI(TAG, "Writing value complete. status=%x", result);
+	}
+	{
 		auto characteristic = temperature_service->get_characteristic(TemperatureDataCharacteristicUuid);
 		ESP_LOGI(TAG, "Enumerating descriptors...");
 		auto result = characteristic->enumerate_descriptors().get();
 		ESP_LOGI(TAG, "Enumerating descriptors completed. status=%x", result);
+
 		characteristic->set_notification_handler([](const uint8_t* data, size_t length) {
 			ESP_LOGI(TAG, "Notification. length=0x%x", length);
 			if (length == 4) {
 				uint16_t raw_obj = data[0] | (data[1] << 8);
 				uint16_t raw_amb = data[2] | (data[3] << 8);
-				float obj = (raw_obj >> 2) * 0.03125f;
-				float amb = (raw_amb >> 2) * 0.03125f;
-				ESP_LOGI(TAG, "AMB:%f, OBJ:%f", amb, obj);
+				SensorData data;
+				data.objective = (raw_obj >> 2) * 0.03125f;
+				data.ambient   = (raw_amb >> 2) * 0.03125f;
+				ESP_LOGI(TAG, "handler: AMB:%f, OBJ:%f", data.ambient, data.objective);
+				sensor_data_queue.send(data);
 			}
 		});
 		result = characteristic->enable_notification_async(true).get();
@@ -238,7 +276,23 @@ void app_main()
 		result = descriptor->write_value_async(value, sizeof(value)).get();
 		ESP_LOGI(TAG, "Descriptor configured. status=%x", result);
 
+		
+		ResponseReceiver response_parser;
+		unique_ptr<char> request_string(new char[2048]);
+		while (true) {
 
-		while (true) vTaskDelay(portTICK_PERIOD_MS * 1000);
+			SensorData data;
+			sensor_data_queue.receive(data);
+			sprintf(request_string.get(), "%s&amb=%f&obj=%f",
+				"/api/HttpTriggerCSharp1?code=vICHv/UvPxv4SlwHcp78rPlKK8Cm6Fz47GpbwtpCbjoa2zpa/A3LRw==&name=ESP32",
+				data.ambient,
+				data.objective);
+			
+			if (http_client.get("esp32functiontest.azurewebsites.net", "443", request_string.get(), response_parser)) {
+				if (!response_parser.get_is_success()) {
+					ESP_LOGE(TAG, "Failed to send sensor data.");
+				}
+			}
+		}
 	}
 }
