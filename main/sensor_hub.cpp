@@ -59,10 +59,10 @@ static bool get_localname_from_advdata(const uint8_t* advData, uint8_t advDataLe
 static unique_ptr<GattClient> gatt_client;
 static bool isFirstGapEvent = true;
 static shared_ptr<GattClientService> temperature_service;
-static const BluetoothUuid TemperatureServiceUuid("F000AA00-0451-4000-B000-000000000000");
-static const BluetoothUuid TemperatureDataCharacteristicUuid("F000AA01-0451-4000-B000-000000000000");
-static const BluetoothUuid TemperatureConfigurationCharacteristicUuid("F000AA02-0451-4000-B000-000000000000");
-static const BluetoothUuid TemperaturePeriodCharacteristicUuid("F000AA03-0451-4000-B000-000000000000");
+static const BluetoothUuid HumidityServiceUuid("F000AA20-0451-4000-B000-000000000000");
+static const BluetoothUuid HumidityDataCharacteristicUuid("F000AA21-0451-4000-B000-000000000000");
+static const BluetoothUuid HumidityConfigurationCharacteristicUuid("F000AA22-0451-4000-B000-000000000000");
+static const BluetoothUuid HumidityPeriodCharacteristicUuid("F000AA23-0451-4000-B000-000000000000");
 static const BluetoothUuid NotificationDescriptorUuid(static_cast<uint16_t>(0x2902u), true);
 
 static void handle_gap_event(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *param)
@@ -81,7 +81,7 @@ static void handle_gap_event(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_
 			memcpy(target_bdaddr, bda, sizeof(esp_bd_addr_t));
 			gatt_client->set_discovery_completed_handler([](GattClient& client) {
 				ESP_LOGI(TAG, "Discovery completed");
-				temperature_service = client.get_service(TemperatureServiceUuid);
+				temperature_service = client.get_service(HumidityServiceUuid);
 				if (!temperature_service) {
 					ESP_LOGE(TAG, "Failed to get temperature service.");
 				}
@@ -170,8 +170,8 @@ static void initialize_wifi()
 
 struct SensorData
 {
-	float objective;
-	float ambient;
+	float temperature;
+	float humidity;
 };
 
 freertos::WaitQueue<SensorData, 8> sensor_data_queue;
@@ -180,6 +180,8 @@ extern "C" void app_main();
 
 void app_main()
 {
+	system_event_t hoge;
+
 	static esp_ble_scan_params_t scan_params;
 
 	ESP_ERROR_CHECK(nvs_flash_init());
@@ -233,25 +235,25 @@ void app_main()
 
 	while (!temperature_service) vTaskDelay(portTICK_PERIOD_MS);
 
-	ESP_LOGI(TAG, "Enumerating temperature characteristics");
+	ESP_LOGI(TAG, "Enumerating humidity characteristics");
 	auto result = temperature_service->enumerate_characteristics().get();
 	ESP_LOGI(TAG, "Enumeration complete! result=%x", result);
 	{
 		ESP_LOGI(TAG, "Writing Configuration characteristic");
-		auto characteristic = temperature_service->get_characteristic(TemperatureConfigurationCharacteristicUuid);
+		auto characteristic = temperature_service->get_characteristic(HumidityConfigurationCharacteristicUuid);
 		uint8_t value = 0x01;
 		auto result = characteristic->write_value_async(&value, 1).get();
 		ESP_LOGI(TAG, "Writing value complete. status=%x", result);
 	}
 	{
 		ESP_LOGI(TAG, "Writing Period characteristic");
-		auto characteristic = temperature_service->get_characteristic(TemperaturePeriodCharacteristicUuid);
+		auto characteristic = temperature_service->get_characteristic(HumidityPeriodCharacteristicUuid);
 		uint8_t value = 200;
 		auto result = characteristic->write_value_async(&value, 1).get();
 		ESP_LOGI(TAG, "Writing value complete. status=%x", result);
 	}
 	{
-		auto characteristic = temperature_service->get_characteristic(TemperatureDataCharacteristicUuid);
+		auto characteristic = temperature_service->get_characteristic(HumidityDataCharacteristicUuid);
 		ESP_LOGI(TAG, "Enumerating descriptors...");
 		auto result = characteristic->enumerate_descriptors().get();
 		ESP_LOGI(TAG, "Enumerating descriptors completed. status=%x", result);
@@ -259,12 +261,13 @@ void app_main()
 		characteristic->set_notification_handler([](const uint8_t* data, size_t length) {
 			ESP_LOGI(TAG, "Notification. length=0x%x", length);
 			if (length == 4) {
-				uint16_t raw_obj = data[0] | (data[1] << 8);
-				uint16_t raw_amb = data[2] | (data[3] << 8);
+				int16_t raw_temp = static_cast<int16_t>(data[0] | (data[1] << 8));
+				uint16_t raw_hum  = data[2] | (data[3] << 8);
 				SensorData data;
-				data.objective = (raw_obj >> 2) * 0.03125f;
-				data.ambient   = (raw_amb >> 2) * 0.03125f;
-				ESP_LOGI(TAG, "handler: AMB:%f, OBJ:%f", data.ambient, data.objective);
+				data.temperature = raw_temp*(165.0f / 65536.0f) - 40.0f;
+				data.humidity = raw_hum / 65536.0f * 100.0f;
+
+				ESP_LOGI(TAG, "handler: temp:%f, hum:%f", data.temperature, data.humidity);
 				sensor_data_queue.send(data);
 			}
 		});
@@ -283,10 +286,10 @@ void app_main()
 
 			SensorData data;
 			sensor_data_queue.receive(data);
-			sprintf(request_string.get(), "%s&amb=%f&obj=%f",
+			sprintf(request_string.get(), "%s&tmp=%f&hum=%f",
 				"/api/HttpTriggerCSharp1?code=vICHv/UvPxv4SlwHcp78rPlKK8Cm6Fz47GpbwtpCbjoa2zpa/A3LRw==&name=ESP32",
-				data.ambient,
-				data.objective);
+				data.temperature,
+				data.humidity);
 			
 			if (http_client.get("esp32functiontest.azurewebsites.net", "443", request_string.get(), response_parser)) {
 				if (!response_parser.get_is_success()) {
