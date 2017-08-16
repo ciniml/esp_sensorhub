@@ -1,0 +1,15 @@
+menu "App-Specific Configuration"
+
+config WIFI_SSID
+    string "WiFi SSID"
+        default "myssid"
+        help
+            SSID of target AP
+
+config WIFI_PASSWORD
+    string "WiFi Password"
+        default "mypassword"
+        help
+            WiFi password off target AP
+
+endmenu

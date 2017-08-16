@@ -158,8 +158,8 @@ static void initialize_wifi()
 	ESP_ERROR_CHECK(esp_wifi_set_storage(WIFI_STORAGE_RAM));
 	ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
 	wifi_config_t wifi_config = { 0 };
-	strcpy(reinterpret_cast<char*>(wifi_config.sta.ssid), "defiant");
-	strcpy(reinterpret_cast<char*>(wifi_config.sta.password), "hogefugapiyo");
+	strcpy(reinterpret_cast<char*>(wifi_config.sta.ssid), CONFIG_WIFI_SSID);
+	strcpy(reinterpret_cast<char*>(wifi_config.sta.password), CONFIG_WIFI_PASSWORD);
 	wifi_config.sta.bssid_set = false;
 	ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
 	ESP_ERROR_CHECK(esp_wifi_start());
@@ -287,11 +287,11 @@ void app_main()
 			SensorData data;
 			sensor_data_queue.receive(data);
 			sprintf(request_string.get(), "%s&tmp=%f&hum=%f",
-				"/api/HttpTriggerCSharp1?code=vICHv/UvPxv4SlwHcp78rPlKK8Cm6Fz47GpbwtpCbjoa2zpa/A3LRw==&name=ESP32",
+				"/test?name=ESP32", //"/api/HttpTriggerCSharp1?code=vICHv/UvPxv4SlwHcp78rPlKK8Cm6Fz47GpbwtpCbjoa2zpa/A3LRw==&name=ESP32",
 				data.temperature,
 				data.humidity);
 			
-			if (http_client.get("esp32functiontest.azurewebsites.net", "443", request_string.get(), response_parser)) {
+			if (http_client.get("192.168.2.10", "443", request_string.get(), response_parser)) {
 				if (!response_parser.get_is_success()) {
 					ESP_LOGE(TAG, "Failed to send sensor data.");
 				}
