@@ -103,6 +103,7 @@
   </ItemGroup>
   <ItemGroup>
     <None Include="esp_idf.props" />
+    <None Include="main\Kconfig.projbuild" />
     <None Include="Makefile" />
     <None Include="sdkconfig" />
   </ItemGroup>
