@@ -23,10 +23,25 @@
 #include <esp_gattc_api.h>
 #include <esp_wifi.h>
 
+#include "aws_iot_config.h"
+#include "aws_iot_log.h"
+#include "aws_iot_version.h"
+#include "aws_iot_mqtt_client_interface.h"
+
+
 #include "freertos_future.hpp"
 #include "bluetooth_util.hpp"
-#include "tls_client.hpp"
-#include "http_client.hpp"
+
+//AWS IoTÇ…ê⁄ë±Ç∑ÇÈÇΩÇﬂÇÃèÿñæèë ( main/component.mkÇÃCOMPONENT_EMBED_TXTFILESÇ≈éwíË)
+extern const uint8_t aws_root_ca_pem_start[] asm("_binary_aws_root_ca_pem_start");
+extern const uint8_t aws_root_ca_pem_end[] asm("_binary_aws_root_ca_pem_end");
+extern const uint8_t certificate_pem_crt_start[] asm("_binary_certificate_pem_crt_start");
+extern const uint8_t certificate_pem_crt_end[] asm("_binary_certificate_pem_crt_end");
+extern const uint8_t private_pem_key_start[] asm("_binary_private_pem_key_start");
+extern const uint8_t private_pem_key_end[] asm("_binary_private_pem_key_end");
+
+static char aws_iot_host_address[] = AWS_IOT_MQTT_HOST;
+static constexpr uint32_t aws_iot_port = AWS_IOT_MQTT_PORT;
 
 static const BluetoothUuid target_uuid("F0000000-0451-4000-B000-000000000000");
 
@@ -102,37 +117,9 @@ static void handle_gap_event(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_
 	}
 }
 
-static TlsClient tls_client;
-static HttpClient http_client(tls_client);
 static std::unique_ptr<freertos::WaitEvent> event_wifi_got_ip;
 
-class ResponseReceiver : public IHttpResponseReceiver
-{
-private:
-	bool is_success;
-
-	virtual int on_message_begin(const HttpClient&) { ESP_LOGI(TAG, "Message begin"); return 0; }
-	virtual int on_message_complete(const HttpClient&) { ESP_LOGI(TAG, "Message end"); return 0; }
-	virtual int on_header_complete(const HttpClient&, const HttpResponseInfo& info) { 
-		ESP_LOGI(TAG, "Header end. status code = %d", info.status_code); 
-		ESP_LOGI(TAG, "Content-length = 0x%x", info.content_length);
-		this->is_success = info.status_code == 200;	// Check status code to determinse the request has been completed successfully or not.
-		return 0; 
-	}
-	virtual int on_header(const HttpClient&, const std::string& name, const std::string& value) {
-		ESP_LOGI(TAG, "%s: %s", name.c_str(), value.c_str());
-		return 0; 
-	}
-	virtual int on_body(const HttpClient&, const std::uint8_t* buffer, std::size_t length) {
-		ESP_LOGI(TAG, "on_body: addr=%p, len=0x%x", buffer, length);
-		return 0; 
-	}
-public:
-	ResponseReceiver() : is_success(false) {}
-
-	bool get_is_success() const { return this->is_success; }
-};
-esp_err_t wifi_event_handler(void* ctx, system_event_t* event) 
+static esp_err_t wifi_event_handler(void* ctx, system_event_t* event)
 {
 	switch (event->event_id)
 	{
@@ -143,7 +130,7 @@ esp_err_t wifi_event_handler(void* ctx, system_event_t* event)
 	default:
 		break;
 	}
-	return ESP_OK; 
+	return ESP_OK;
 }
 
 static void initialize_wifi()
@@ -176,35 +163,95 @@ struct SensorData
 
 freertos::WaitQueue<SensorData, 8> sensor_data_queue;
 
-extern "C" void app_main();
+static void aws_iot_disconnect_handler(AWS_IoT_Client *pClient, void *data) {
+	ESP_LOGW(TAG, "MQTT Disconnect");
+	IoT_Error_t rc = FAILURE;
 
-void app_main()
+	if (NULL == pClient) {
+		return;
+	}
+
+	if (aws_iot_is_autoreconnect_enabled(pClient)) {
+		ESP_LOGI(TAG, "Auto Reconnect is enabled, Reconnecting attempt will start now");
+	}
+	else {
+		ESP_LOGW(TAG, "Auto Reconnect not enabled. Starting manual reconnect...");
+		rc = aws_iot_mqtt_attempt_reconnect(pClient);
+		if (NETWORK_RECONNECTED == rc) {
+			ESP_LOGW(TAG, "Manual Reconnect Successful");
+		}
+		else {
+			ESP_LOGW(TAG, "Manual Reconnect Failed - %d", rc);
+		}
+	}
+}
+static void aws_iot_subscribe_callback_handler(AWS_IoT_Client *pClient, char *topicName, uint16_t topicNameLen,
+	IoT_Publish_Message_Params *params, void *pData) {
+	ESP_LOGI(TAG, "Subscribe callback");
+	ESP_LOGI(TAG, "%.*s\t%.*s", topicNameLen, topicName, (int)params->payloadLen, (char *)params->payload);
+}
+
+static void initialize_aws_iot(AWS_IoT_Client& client)
 {
-	system_event_t hoge;
+	int32_t i = 0;
 
-	static esp_ble_scan_params_t scan_params;
-
-	ESP_ERROR_CHECK(nvs_flash_init());
-
-	printf("Hello world!\n");
-	/* Print chip information */
-	esp_chip_info_t chip_info;
-	esp_chip_info(&chip_info);
-	printf("This is ESP32 chip with %d CPU cores, WiFi%s%s, ",
-		chip_info.cores,
-		(chip_info.features & CHIP_FEATURE_BT) ? "/BT" : "",
-		(chip_info.features & CHIP_FEATURE_BLE) ? "/BLE" : "");
-
-	printf("silicon revision %d, ", chip_info.revision);
-
-	printf("%dMB %s flash\n", spi_flash_get_chip_size() / (1024 * 1024),
-		(chip_info.features & CHIP_FEATURE_EMB_FLASH) ? "embedded" : "external");
-
-	uint8_t cert;
-	tls_client.initialize(&cert, 0);
-
-	initialize_wifi();
+	IoT_Error_t rc = FAILURE;
 	
+	IoT_Client_Init_Params mqttInitParams = iotClientInitParamsDefault;
+	IoT_Client_Connect_Params connectParams = iotClientConnectParamsDefault;
+
+	mqttInitParams.enableAutoReconnect = false;
+	mqttInitParams.pHostURL = aws_iot_host_address;
+	mqttInitParams.port = aws_iot_port;
+
+	mqttInitParams.pRootCALocation = (const char *)aws_root_ca_pem_start;
+	mqttInitParams.pDeviceCertLocation = (const char *)certificate_pem_crt_start;
+	mqttInitParams.pDevicePrivateKeyLocation = (const char *)private_pem_key_start;
+
+	mqttInitParams.mqttCommandTimeout_ms = 20000;
+	mqttInitParams.tlsHandshakeTimeout_ms = 5000;
+	mqttInitParams.isSSLHostnameVerify = true;
+	mqttInitParams.disconnectHandler = aws_iot_disconnect_handler;
+	mqttInitParams.disconnectHandlerData = NULL;
+
+	rc = aws_iot_mqtt_init(&client, &mqttInitParams);
+	if (SUCCESS != rc) {
+		ESP_LOGE(TAG, "aws_iot_mqtt_init returned error : %d ", rc);
+		abort();
+	}
+
+	connectParams.keepAliveIntervalInSec = 10;
+	connectParams.isCleanSession = true;
+	connectParams.MQTTVersion = MQTT_3_1_1;
+	connectParams.pClientID = CONFIG_AWS_CLIENT_ID;
+	connectParams.clientIDLen = (uint16_t)strlen(CONFIG_AWS_CLIENT_ID);
+	connectParams.isWillMsgPresent = false;
+
+	ESP_LOGI(TAG, "Connecting to AWS...");
+	do {
+		rc = aws_iot_mqtt_connect(&client, &connectParams);
+		if (rc != SUCCESS) {
+			ESP_LOGE(TAG, "Error(%d) connecting to %s:%d", rc, mqttInitParams.pHostURL, mqttInitParams.port);
+			vTaskDelay(pdMS_TO_TICKS(1000));
+		}
+	} while (rc != SUCCESS);
+
+	rc = aws_iot_mqtt_autoreconnect_set_status(&client, true);
+	if (SUCCESS != rc) {
+		ESP_LOGE(TAG, "Unable to set Auto Reconnect to true - %d", rc);
+		abort();
+	}
+	ESP_LOGI(TAG, "Connected to AWS");
+}
+
+static AWS_IoT_Client aws_iot_client;
+static volatile uint32_t super_buffer[128];
+
+static void aws_iot_task(void* param) {
+	
+	
+	// initialize AWS IoT connection
+	initialize_aws_iot(aws_iot_client);
 
 	ESP_LOGI(TAG, "Initializing ESP Bluedroid...");
 
@@ -218,6 +265,8 @@ void app_main()
 	// Initialize GattClient
 	GattClient::initialize();
 
+
+	static esp_ble_scan_params_t scan_params;
 	ESP_LOGI(TAG, "Initialzing ESP BLE...");
 	ESP_ERROR_CHECK(esp_ble_gap_register_callback(handle_gap_event));
 	scan_params.scan_type = BLE_SCAN_TYPE_ACTIVE;
@@ -262,7 +311,7 @@ void app_main()
 			ESP_LOGI(TAG, "Notification. length=0x%x", length);
 			if (length == 4) {
 				int16_t raw_temp = static_cast<int16_t>(data[0] | (data[1] << 8));
-				uint16_t raw_hum  = data[2] | (data[3] << 8);
+				uint16_t raw_hum = data[2] | (data[3] << 8);
 				SensorData data;
 				data.temperature = raw_temp*(165.0f / 65536.0f) - 40.0f;
 				data.humidity = raw_hum / 65536.0f * 100.0f;
@@ -279,23 +328,60 @@ void app_main()
 		result = descriptor->write_value_async(value, sizeof(value)).get();
 		ESP_LOGI(TAG, "Descriptor configured. status=%x", result);
 
-		
-		ResponseReceiver response_parser;
-		unique_ptr<char> request_string(new char[2048]);
+
+		unique_ptr<char> payload(new char[256]);
 		while (true) {
+			IoT_Error_t rc;
+
+			rc = aws_iot_mqtt_yield(&aws_iot_client, 100);
+			if (NETWORK_ATTEMPTING_RECONNECT == rc) {
+				// If the client is attempting to reconnect we will skip the rest of the loop.
+				continue;
+			}
 
 			SensorData data;
 			sensor_data_queue.receive(data);
-			sprintf(request_string.get(), "%s&tmp=%f&hum=%f",
-				"/test?name=ESP32", //"/api/HttpTriggerCSharp1?code=vICHv/UvPxv4SlwHcp78rPlKK8Cm6Fz47GpbwtpCbjoa2zpa/A3LRw==&name=ESP32",
-				data.temperature,
-				data.humidity);
-			
-			if (http_client.get("192.168.2.10", "443", request_string.get(), response_parser)) {
-				if (!response_parser.get_is_success()) {
-					ESP_LOGE(TAG, "Failed to send sensor data.");
-				}
-			}
+
+			const char *TOPIC = "test_topic/esp32";
+			const int TOPIC_LEN = strlen(TOPIC);
+			IoT_Publish_Message_Params params;
+
+			params.qos = QOS0;
+			params.payload = payload.get();
+			params.isRetained = 0;
+			params.payloadLen = sprintf(payload.get(), "{\"temp\":%f, \"hum\":%f}", data.temperature, data.humidity);
+			ESP_LOGI(TAG, "Publishing a message: %s", payload.get());
+			//rc = aws_iot_mqtt_publish(&aws_iot_client, TOPIC, TOPIC_LEN, &params);
+
+			//if (rc != SUCCESS) {
+			//	ESP_LOGE(TAG, "Failed to publish(rc=%d)", rc);
+			//}
 		}
 	}
+}
+
+extern "C" void app_main();
+
+void app_main()
+{
+	ESP_ERROR_CHECK(nvs_flash_init());
+
+	printf("Hello world!\n");
+	/* Print chip information */
+	esp_chip_info_t chip_info;
+	esp_chip_info(&chip_info);
+	printf("This is ESP32 chip with %d CPU cores, WiFi%s%s, ",
+		chip_info.cores,
+		(chip_info.features & CHIP_FEATURE_BT) ? "/BT" : "",
+		(chip_info.features & CHIP_FEATURE_BLE) ? "/BLE" : "");
+
+	printf("silicon revision %d, ", chip_info.revision);
+
+	printf("%dMB %s flash\n", spi_flash_get_chip_size() / (1024 * 1024),
+		(chip_info.features & CHIP_FEATURE_EMB_FLASH) ? "embedded" : "external");
+
+	// Initialize WiFi connection
+	initialize_wifi();
+	
+	aws_iot_task(nullptr);
 }

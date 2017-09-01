@@ -12,4 +12,10 @@ config WIFI_PASSWORD
         help
             WiFi password off target AP
 
+config AWS_CLIENT_ID
+	string "AWS Client ID"
+		default "esp32"
+		help
+			Client ID of AWS IoT Hub connection
+
 endmenu
