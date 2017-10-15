@@ -1,0 +1,4 @@
+[submodule "BLE"]
+	path = BLE
+	url = https://github.com/nkolban/ESP32_BLE_Arduino
+	branch = master
