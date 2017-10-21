@@ -158,7 +158,7 @@ namespace freertos
 			{
 				void operator()(TResult* result) { result->~TResult(); }
 			};
-			typename std::aligned_storage<sizeof(TResult)>::type storage;
+			typename std::aligned_storage<sizeof(TResult), alignof(TResult)>::type storage;
 			std::unique_ptr<TResult, Deleter> result;
 			WaitEvent event;
 			Mutex mutex;

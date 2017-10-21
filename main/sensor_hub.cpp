@@ -31,6 +31,7 @@
 
 #include "freertos_future.hpp"
 #include "bluetooth_util.hpp"
+#include "lazy.hpp"
 
 //AWS IoTÇ…ê⁄ë±Ç∑ÇÈÇΩÇﬂÇÃèÿñæèë ( main/component.mkÇÃCOMPONENT_EMBED_TXTFILESÇ≈éwíË)
 extern const uint8_t aws_root_ca_pem_start[] asm("_binary_aws_root_ca_pem_start");
@@ -161,7 +162,7 @@ struct SensorData
 	float humidity;
 };
 
-freertos::WaitQueue<SensorData, 8> sensor_data_queue;
+Lazy<freertos::WaitQueue<SensorData, 8>> sensor_data_queue;
 
 static void aws_iot_disconnect_handler(AWS_IoT_Client *pClient, void *data) {
 	ESP_LOGW(TAG, "MQTT Disconnect");
@@ -302,6 +303,8 @@ static void aws_iot_task(void* param) {
 		ESP_LOGI(TAG, "Writing value complete. status=%x", result);
 	}
 	{
+		sensor_data_queue.ensure();
+
 		auto characteristic = temperature_service->get_characteristic(HumidityDataCharacteristicUuid);
 		ESP_LOGI(TAG, "Enumerating descriptors...");
 		auto result = characteristic->enumerate_descriptors().get();
@@ -317,7 +320,7 @@ static void aws_iot_task(void* param) {
 				data.humidity = raw_hum / 65536.0f * 100.0f;
 
 				ESP_LOGI(TAG, "handler: temp:%f, hum:%f", data.temperature, data.humidity);
-				sensor_data_queue.send(data);
+				sensor_data_queue->send(data);
 			}
 		});
 		result = characteristic->enable_notification_async(true).get();
@@ -333,14 +336,17 @@ static void aws_iot_task(void* param) {
 		while (true) {
 			IoT_Error_t rc;
 
+			ESP_LOGI(TAG, "process AWS IoT MQTT");
 			rc = aws_iot_mqtt_yield(&aws_iot_client, 100);
 			if (NETWORK_ATTEMPTING_RECONNECT == rc) {
 				// If the client is attempting to reconnect we will skip the rest of the loop.
+				sensor_data_queue->reset();
+				vTaskDelay(pdMS_TO_TICKS(1));
 				continue;
 			}
 
 			SensorData data;
-			sensor_data_queue.receive(data);
+			sensor_data_queue->receive(data);
 
 			const char *TOPIC = "test_topic/esp32";
 			const int TOPIC_LEN = strlen(TOPIC);
@@ -351,11 +357,11 @@ static void aws_iot_task(void* param) {
 			params.isRetained = 0;
 			params.payloadLen = sprintf(payload.get(), "{\"temp\":%f, \"hum\":%f}", data.temperature, data.humidity);
 			ESP_LOGI(TAG, "Publishing a message: %s", payload.get());
-			//rc = aws_iot_mqtt_publish(&aws_iot_client, TOPIC, TOPIC_LEN, &params);
+			rc = aws_iot_mqtt_publish(&aws_iot_client, TOPIC, TOPIC_LEN, &params);
 
-			//if (rc != SUCCESS) {
-			//	ESP_LOGE(TAG, "Failed to publish(rc=%d)", rc);
-			//}
+			if (rc != SUCCESS) {
+				ESP_LOGE(TAG, "Failed to publish(rc=%d)", rc);
+			}
 		}
 	}
 }
@@ -383,5 +389,5 @@ void app_main()
 	// Initialize WiFi connection
 	initialize_wifi();
 	
-	aws_iot_task(nullptr);
+	xTaskCreatePinnedToCore(&aws_iot_task, "aws_iot_task", 36*1024, NULL, 5, NULL, 0);
 }

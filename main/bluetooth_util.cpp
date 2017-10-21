@@ -94,17 +94,9 @@ esp_err_t GattClientCharacteristic::begin_read_value()
 
 freertos::future<esp_err_t> GattClientCharacteristic::write_value_async(const uint8_t* buffer, size_t length)
 {
-	auto copied_data = new uint8_t[length];
-	memcpy(copied_data, buffer, length);
-	return this->write_value_async(std::shared_ptr<uint8_t>(copied_data), length);
-}
-freertos::future<esp_err_t> GattClientCharacteristic::write_value_async(const std::shared_ptr<uint8_t>& buffer, size_t length)
-{
-	this->value_write_context.data = buffer;
-	this->value_write_context.length = length;
 	auto service_id = this->service.get_id();
 	this->value_write_promise.reset();
-	esp_err_t result = esp_ble_gattc_write_char(this->get_gattc_if(), this->get_connection_id(), &service_id, &this->id, length, this->value_write_context.data.get(), ESP_GATT_WRITE_TYPE_RSP, ESP_GATT_AUTH_REQ_NONE);
+	esp_err_t result = esp_ble_gattc_write_char(this->get_gattc_if(), this->get_connection_id(), &service_id, &this->id, length, const_cast<uint8_t*>(buffer), ESP_GATT_WRITE_TYPE_RSP, ESP_GATT_AUTH_REQ_NONE);
 	if (result != ESP_OK) {
 		this->value_write_promise.set_value(result);
 	}
@@ -231,19 +223,10 @@ GattClientDescriptor::GattClientDescriptor(GattClientCharacteristic & characteri
 
 freertos::future<esp_err_t> GattClientDescriptor::write_value_async(const uint8_t * buffer, size_t length)
 {
-	auto copied_data = new uint8_t[length];
-	memcpy(copied_data, buffer, length);
-	return this->write_value_async(std::shared_ptr<uint8_t>(copied_data), length);
-}
-
-freertos::future<esp_err_t> GattClientDescriptor::write_value_async(const std::shared_ptr<uint8_t>& buffer, size_t length)
-{
-	this->write_context.data = buffer;
-	this->write_context.length = length;
 	auto service_id = this->characteristic.service.get_id();
 	auto char_id = this->characteristic.get_id();
 	this->write_promise.reset();
-	esp_err_t result = esp_ble_gattc_write_char_descr(this->get_gattc_if(), this->get_connection_id(), &service_id, &char_id, &this->id, length, this->write_context.data.get(), ESP_GATT_WRITE_TYPE_RSP, ESP_GATT_AUTH_REQ_NONE);
+	esp_err_t result = esp_ble_gattc_write_char_descr(this->get_gattc_if(), this->get_connection_id(), &service_id, &char_id, &this->id, length, const_cast<uint8_t*>(buffer), ESP_GATT_WRITE_TYPE_RSP, ESP_GATT_AUTH_REQ_NONE);
 	if (result != ESP_OK) {
 		this->write_promise.set_value(result);
 	}

@@ -404,11 +404,6 @@ private:
 	std::function<void(const uint8_t* data, size_t length)> notification_handler;
 	std::function<void(esp_gatt_status_t, uint8_t*, size_t)> value_read_handler;
 	
-	struct ValueWriteContext
-	{
-		std::shared_ptr<uint8_t> data;
-		size_t length;
-	} value_write_context;
 	freertos::single_promise<esp_err_t> value_write_promise;
 
 	freertos::single_promise<esp_err_t> enable_notification_promise;
@@ -434,7 +429,6 @@ public:
 
 	esp_err_t begin_read_value();
 	freertos::future<esp_err_t> write_value_async(const uint8_t* buffer, size_t length);
-	freertos::future<esp_err_t> write_value_async(const std::shared_ptr<uint8_t>& buffer, size_t length);
 	freertos::future<esp_err_t> enable_notification_async(bool enable);
 
 	template<typename THandler>
@@ -470,8 +464,7 @@ public:
 	esp_gatt_id_t get_id() const { return this->id; }
 	
 	freertos::future<esp_err_t> write_value_async(const uint8_t* buffer, size_t length);
-	freertos::future<esp_err_t> write_value_async(const std::shared_ptr<uint8_t>& buffer, size_t length);
-
+	
 	virtual void handle_gattc_event(esp_gattc_cb_event_t event, esp_gatt_if_t gattc_if, esp_ble_gattc_cb_param_t* param);
 };
 
