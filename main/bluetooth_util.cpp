@@ -1,4 +1,7 @@
 #include "bluetooth_util.hpp"
+#include "gattclient.hpp"
+#include "gattclientservice.hpp"
+#include "gattclientcharacteristic.hpp"
 
 // Bluetooth Base UUID 00000000-0000-1000-8000-00805F9B34FB
 const uint8_t BluetoothUuid::base_uuid[16] = { 0xfb, 0x34, 0x9b, 0x5f, 0x80, 0x00, 0x00, 0x80, 0x00, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
@@ -7,6 +10,23 @@ const uint8_t BluetoothUuid::base_uuid[16] = { 0xfb, 0x34, 0x9b, 0x5f, 0x80, 0x0
 const char GattClient::TAG[] = "GattClient";
 std::aligned_storage<sizeof(GattClient::SharedContext), alignof(GattClient::SharedContext)>::type GattClient::shared_context_storage;
 GattClient::SharedContext* GattClient::shared_context;
+
+void GattClientService::handle_gattc_event(esp_gattc_cb_event_t event, esp_gatt_if_t gattc_if, esp_ble_gattc_cb_param_t * param)
+{
+}
+
+GattClientService::GattClientService() : client(nullptr) {}
+GattClientService::GattClientService(GattClient& client, const BluetoothUuid& uuid, uint16_t start_handle, uint16_t end_handle) : client(&client), uuid(uuid), start_handle(start_handle), end_handle(end_handle)
+{
+	client.register_eventsink(this);
+}
+GattClientService::~GattClientService()
+{
+	if (this->client != nullptr) {
+		this->client->unregister_eventsink(this);
+	}
+	this->client = nullptr;
+}
 
 void GattClient::handle_gattc_event(esp_gattc_cb_event_t event, esp_gatt_if_t gattc_if, esp_ble_gattc_cb_param_t *param) {
 	freertos::LockGuard<freertos::Mutex> guard(shared_context->clients_mutex);
@@ -21,83 +41,129 @@ void GattClient::handle_gattc_event(esp_gattc_cb_event_t event, esp_gatt_if_t ga
 	}
 }
 
-std::shared_ptr<GattClientService> GattClient::get_service(const BluetoothUuid& uuid)
+void GattClient::handle_gattc_event_inner(esp_gattc_cb_event_t event, esp_gatt_if_t gattc_if, esp_ble_gattc_cb_param_t * param)
 {
-	if (!this->is_service_discovered) return nullptr;
-
-	const auto& it = this->services.find(uuid);
-	if (it == this->services.end()) return nullptr;
-
-	
-	auto shared = std::make_shared<GattClientService>(*this, it->second);
-	this->register_eventsink(shared);
-	return shared;
-}
-
-void GattClientService::handle_gattc_event(esp_gattc_cb_event_t event, esp_gatt_if_t gattc_if, esp_ble_gattc_cb_param_t *param)
-{
-	uint16_t conn_id = this->client.get_connection_id();
-
 	switch (event)
 	{
-	case ESP_GATTC_GET_CHAR_EVT: {
-		if (param->get_char.conn_id == conn_id && param->get_char.srvc_id.id.inst_id == this->id.id.inst_id) {
-			if(param->get_char.status == ESP_GATT_OK) {
-				const auto& char_id = param->get_char.char_id;
-				auto it = this->characteristics.find(BluetoothUuid(char_id.uuid));
-				if (it != this->characteristics.end()) {
-					it->second->update_id(char_id);
+	case ESP_GATTC_OPEN_EVT: {
+		if (param->open.status == ESP_GATT_OK) {
+			this->conn_id = param->open.conn_id;
+			this->mtu = param->open.mtu;
+			this->state = State::Opened;
+			ESP_LOGI(TAG, "Device opened. conn_id=%x, mtu=%x", this->conn_id, this->mtu);
+
+		}
+		else {
+			ESP_LOGE(TAG, "Failed to open. status=%x", param->open.status);
+		}
+		break;
+	}
+	case ESP_GATTC_CLOSE_EVT: {
+		if (this->bd_addr == param->close.remote_bda) {
+			this->state = State::Closed;
+			ESP_LOGI(TAG, "Device closed.");
+		}
+		break;
+	}
+	case ESP_GATTC_CONNECT_EVT: {
+		if (this->bd_addr == param->connect.remote_bda) {
+			if (param->connect.status == ESP_GATT_OK) {
+				this->state = State::Connected;
+				ESP_LOGI(TAG, "Device connected.");
+				esp_err_t result = esp_ble_gattc_search_service(this->gattc_if, this->conn_id, nullptr);
+				if (result != ESP_OK) {
+					ESP_LOGE(TAG, "esp_ble_gattc_search_service returned %d\n", result);
 				}
-				else {
-					auto shared = std::make_shared<GattClientCharacteristic>(*this, char_id);
-					this->get_client().register_eventsink(shared);
-					this->characteristics.insert(std::make_pair(BluetoothUuid(param->get_char.char_id.uuid), shared));
+			}
+		}
+		break;
+	}
+	case ESP_GATTC_CFG_MTU_EVT: {
+		break;
+	}
+	case ESP_GATTC_SRVC_CHG_EVT: {
+		if (this->bd_addr == param->srvc_chg.remote_bda) {
+			esp_ble_gattc_cache_refresh(param->srvc_chg.remote_bda);
+			ESP_LOGI(TAG, "Service changed.");
+		}
+		break;
+	}
+	case ESP_GATTC_SEARCH_RES_EVT: {    // Service discovery result.
+		if (param->search_res.conn_id == this->conn_id) {
+			BluetoothUuid uuid(param->search_res.srvc_id.uuid);
+			char buffer[128];
+			uuid.to_string(buffer);
+			ESP_LOGI(TAG, "Service discovered. UUID=%s", buffer);
+		}
+		break;
+	}
+	case ESP_GATTC_SEARCH_CMPL_EVT: {
+		if (param->search_cmpl.conn_id == this->conn_id) {
+			ESP_LOGI(TAG, "Service discovery completed.");
+			if (param->search_cmpl.status == ESP_GATT_OK) {
+				this->is_service_discovered = true;
+				if (this->discovery_completed_handler) {
+					this->discovery_completed_handler(*this);
 				}
-				esp_ble_gattc_get_characteristic(gattc_if, conn_id, &param->get_char.srvc_id, &param->get_char.char_id);
 			}
 			else {
-				if (this->enumerate_promise.is_valid()) {
-					this->enumerate_promise.set_value(ESP_OK);
-				}
+				this->is_service_discovered = false;
 			}
 		}
 		break;
 	}
 	default: break;
 	}
-}
 
-freertos::future<esp_err_t> GattClientService::enumerate_characteristics()
-{
-	this->enumerate_promise.reset();
-
-	esp_err_t result = esp_ble_gattc_get_characteristic(this->client.get_gattc_if(), this->client.get_connection_id(), &this->id, nullptr);
-	if (result != ESP_OK) {
-		this->enumerate_promise.set_value(result);
+	for (auto& ptr : this->eventsinks) {
+		ptr->handle_gattc_event(event, gattc_if, param);
 	}
-	return this->enumerate_promise.get_future();
 }
 
-std::shared_ptr<GattClientCharacteristic> GattClientService::get_characteristic(const BluetoothUuid uuid) const
+
+GattClientService GattClient::get_service(const BluetoothUuid& uuid, size_t index)
 {
-	const auto& it = this->characteristics.find(uuid);
-	return it == this->characteristics.end() ? nullptr : it->second;
+	esp_gattc_service_elem_t element;
+	uint16_t count = 1;
+	auto esp_uuid = uuid.value;
+
+	esp_err_t result = esp_ble_gattc_get_service(this->gattc_if, this->conn_id, &esp_uuid, &element, &count, index);
+	if (result != ESP_OK) {
+		return GattClientService();
+	}
+
+	return GattClientService(*this, uuid, element.start_handle, element.end_handle);
 }
 
 
+GattClientCharacteristic GattClientService::get_characteristic(const BluetoothUuid& uuid)
+{
+	esp_gattc_char_elem_t element;
+	uint16_t count = 1;
+	auto esp_uuid = uuid.value;
+
+	esp_err_t result = esp_ble_gattc_get_char_by_uuid(this->client->get_gattc_if() , this->client->get_connection_id(), this->start_handle, this->end_handle, uuid.value, &element, &count);
+	if (result != ESP_OK) {
+		ESP_LOGE(TAG, "esp_ble_gattc_get_char_by_uuid returned %d", result);
+		return GattClientCharacteristic();
+	}
+
+	return std::move(GattClientCharacteristic(*this->client, element));
+}
+
+const char GattClientService::TAG[] = "GattClientService";
 const char GattClientCharacteristic::TAG[] = "GattClientChar";
 esp_err_t GattClientCharacteristic::begin_read_value()
 {
-	esp_gatt_srvc_id_t service_id = this->service.get_id();
-	return esp_ble_gattc_read_char(this->get_gattc_if(), this->get_connection_id(), &service_id, &this->id, ESP_GATT_AUTH_REQ_NONE);
+	return esp_ble_gattc_read_char(this->get_gattc_if(), this->get_connection_id(), this->element.char_handle, ESP_GATT_AUTH_REQ_NONE);
 }
 
 freertos::future<esp_err_t> GattClientCharacteristic::write_value_async(const uint8_t* buffer, size_t length)
 {
-	auto service_id = this->service.get_id();
 	this->value_write_promise.reset();
-	esp_err_t result = esp_ble_gattc_write_char(this->get_gattc_if(), this->get_connection_id(), &service_id, &this->id, length, const_cast<uint8_t*>(buffer), ESP_GATT_WRITE_TYPE_RSP, ESP_GATT_AUTH_REQ_NONE);
+	esp_err_t result = esp_ble_gattc_write_char(this->get_gattc_if(), this->get_connection_id(), this->element.char_handle, length, const_cast<uint8_t*>(buffer), ESP_GATT_WRITE_TYPE_RSP, ESP_GATT_AUTH_REQ_NONE);
 	if (result != ESP_OK) {
+		ESP_LOGE(TAG, "esp_ble_gattc_write_char returned %d", result);
 		this->value_write_promise.set_value(result);
 	}
 	return this->value_write_promise.get_future();
@@ -106,15 +172,14 @@ freertos::future<esp_err_t> GattClientCharacteristic::write_value_async(const ui
 freertos::future<esp_err_t> GattClientCharacteristic::enable_notification_async(bool enable)
 {
 	auto gattc_if = this->get_gattc_if();
-	BdAddr bda = this->service.get_client().get_bd_addr();
-	esp_gatt_srvc_id_t service_id = this->service.get_id();
+	BdAddr bda = this->client->get_bd_addr();
 	esp_gatt_status_t result;
 	this->enable_notification_promise.reset();
 	if (enable) {
-		result = (esp_gatt_status_t)esp_ble_gattc_register_for_notify(gattc_if, bda.value, &service_id, &this->id);
+		result = (esp_gatt_status_t)esp_ble_gattc_register_for_notify(gattc_if, bda.value, this->element.char_handle);
 	}
 	else {
-		result = (esp_gatt_status_t)esp_ble_gattc_unregister_for_notify(gattc_if, bda.value, &service_id, &this->id);
+		result = (esp_gatt_status_t)esp_ble_gattc_unregister_for_notify(gattc_if, bda.value, this->element.char_handle);
 	}
 	if (result != ESP_GATT_OK) {
 		this->enable_notification_promise.set_value(result);
@@ -122,36 +187,67 @@ freertos::future<esp_err_t> GattClientCharacteristic::enable_notification_async(
 	return this->enable_notification_promise.get_future();
 }
 
-GattClientCharacteristic::GattClientCharacteristic(GattClientService& service, esp_gatt_id_t id) : service(service), id(id), is_descriptor_enumeratred(false) {}
-
-freertos::future<esp_err_t> GattClientCharacteristic::enumerate_descriptors()
+uint16_t GattClientCharacteristic::get_connection_id() const
 {
-	esp_gatt_srvc_id_t service_id = this->service.get_id();
-	this->enumerate_descriptors_promise.reset();
-	esp_err_t result = esp_ble_gattc_get_descriptor(this->get_gattc_if(), this->get_connection_id(), &service_id, &this->id, nullptr);
-	if (result != ESP_OK) {
-		this->enumerate_descriptors_promise.set_value(result);
+	return this->client->get_connection_id();
+}
+
+esp_gatt_if_t GattClientCharacteristic::get_gattc_if() const
+{
+	return this->client->get_gattc_if();
+}
+
+GattClientCharacteristic::GattClientCharacteristic(GattClient& client, const esp_gattc_char_elem_t& element) : client(&client), element(element) {}
+
+GattClientCharacteristic::GattClientCharacteristic(GattClientCharacteristic&& obj)
+{
+	if (obj.client != nullptr) {
+		this->client = obj.client;
+		this->element = obj.element;
+		obj.client->register_eventsink(this);
 	}
-	return this->enumerate_descriptors_promise.get_future();
+}
+GattClientCharacteristic::~GattClientCharacteristic()
+{
+	if (this->client != nullptr) {
+		this->client->unregister_eventsink(this);
+	}
+}
+GattClientCharacteristic& GattClientCharacteristic::operator=(const GattClientCharacteristic& rhs) 
+{
+	if (this->client == nullptr) {
+		this->client = rhs.client;
+		this->element = rhs.element;
+		this->client->register_eventsink(this);
+	}
+	return *this;
 }
 
-std::shared_ptr<GattClientDescriptor> GattClientCharacteristic::get_descriptor(const BluetoothUuid uuid) const
+GattClientDescriptor GattClientCharacteristic::get_descriptor(const BluetoothUuid uuid)
 {
-	const auto& it = this->descriptors.find(uuid);
-	return it == this->descriptors.end() ? nullptr : it->second;
+	esp_gattc_descr_elem_t element;
+	uint16_t count = 1;
+	auto esp_uuid = uuid.value;
+
+	esp_err_t result = esp_ble_gattc_get_descr_by_char_handle(this->get_gattc_if(), this->get_connection_id(), this->element.char_handle, uuid.value, &element, &count);
+	if (result != ESP_OK || count == 0) {
+		ESP_LOGE(TAG, "esp_ble_gattc_get_descr_by_char_handle returned %d", result);
+		return GattClientDescriptor();
+	}
+	
+	return std::move(GattClientDescriptor(*this->client, element));
 }
+
 
 void GattClientCharacteristic::handle_gattc_event(esp_gattc_cb_event_t event, esp_gatt_if_t gattc_if, esp_ble_gattc_cb_param_t *param)
 {
-	auto connection_id = this->service.get_client().get_connection_id();
-	auto service_inst_id = this->service.get_id().id.inst_id;
-	auto char_inst_id = this->id.inst_id;
-
+	auto connection_id = this->get_connection_id();
+	
 	switch (event)
 	{
 	case ESP_GATTC_READ_CHAR_EVT: {
 
-		if (param->read.conn_id == connection_id && param->read.char_id.inst_id == id.inst_id) {
+		if (param->read.conn_id == connection_id && param->read.handle == this->element.char_handle) {
 			if (this->value_read_handler) {
 				this->value_read_handler(param->read.status, param->read.value, param->read.value_len);
 			}
@@ -159,40 +255,16 @@ void GattClientCharacteristic::handle_gattc_event(esp_gattc_cb_event_t event, es
 		break;
 	}
 	case ESP_GATTC_WRITE_CHAR_EVT: {
-		if (param->write.conn_id == connection_id && param->write.char_id.inst_id == id.inst_id) {
+		ESP_LOGI(TAG, "WRITE_CHAR\n");
+		if (param->write.conn_id == connection_id && param->write.handle == this->element.char_handle) {
 			if (this->value_write_promise.is_valid()) {
 				this->value_write_promise.set_value(param->write.status);
 			}
 		}
 		break;
 	}
-	case ESP_GATTC_GET_DESCR_EVT: {
-		if (param->get_descr.conn_id == connection_id && param->get_descr.char_id.inst_id == this->id.inst_id) {
-			if (param->get_descr.status == ESP_GATT_OK) {
-				esp_gatt_id_t descr_id = param->get_descr.descr_id;
-				auto it = this->descriptors.find(BluetoothUuid(descr_id.uuid));
-				if (it == this->descriptors.end()) {
-					auto shared = std::make_shared<GattClientDescriptor>(*this, descr_id);
-					this->service.get_client().register_eventsink(shared);
-					this->descriptors.insert(std::make_pair(BluetoothUuid(descr_id.uuid), shared));
-				}
-				BluetoothUuid uuid(param->get_descr.descr_id.uuid);
-				char uuid_str[100];
-				uuid.to_string(uuid_str);
-				ESP_LOGI(TAG, "DESCR: %s", uuid_str);
-				esp_ble_gattc_get_descriptor(gattc_if, connection_id, &param->get_descr.srvc_id, &param->get_descr.char_id, &param->get_descr.descr_id);
-			}
-			else {
-				if (this->enumerate_descriptors_promise.is_valid()) {
-					this->enumerate_descriptors_promise.set_value(param->get_descr.status);
-				}
-				this->is_descriptor_enumeratred = true;
-			}
-		}
-		break;
-	}
 	case ESP_GATTC_REG_FOR_NOTIFY_EVT: {
-		if (param->reg_for_notify.srvc_id.id.inst_id == service_inst_id && param->reg_for_notify.char_id.inst_id == char_inst_id) {
+		if (param->reg_for_notify.handle == this->element.char_handle) {
 			if (this->enable_notification_promise.is_valid()) {
 				this->enable_notification_promise.set_value(param->reg_for_notify.status);
 			}
@@ -200,7 +272,7 @@ void GattClientCharacteristic::handle_gattc_event(esp_gattc_cb_event_t event, es
 		break;
 	}
 	case ESP_GATTC_UNREG_FOR_NOTIFY_EVT: {
-		if (param->unreg_for_notify.srvc_id.id.inst_id == service_inst_id && param->unreg_for_notify.char_id.inst_id == char_inst_id) {
+		if (param->unreg_for_notify.handle == this->element.char_handle ) {
 			if (this->enable_notification_promise.is_valid()) {
 				this->enable_notification_promise.set_value(param->unreg_for_notify.status);
 			}
@@ -208,7 +280,7 @@ void GattClientCharacteristic::handle_gattc_event(esp_gattc_cb_event_t event, es
 		break;
 	}
 	case ESP_GATTC_NOTIFY_EVT: {
-		if (param->notify.conn_id == connection_id && param->notify.char_id.inst_id == this->id.inst_id) {
+		if (param->notify.conn_id == connection_id && param->notify.handle == this->element.char_handle) {
 			if (this->notification_handler) {
 				this->notification_handler(param->notify.value, param->notify.value_len);
 			}
@@ -219,14 +291,46 @@ void GattClientCharacteristic::handle_gattc_event(esp_gattc_cb_event_t event, es
 	}
 }
 
-GattClientDescriptor::GattClientDescriptor(GattClientCharacteristic & characteristic, esp_gatt_id_t id) : characteristic(characteristic), id(id) {}
+uint16_t GattClientDescriptor::get_connection_id() const
+{
+	return this->client->get_connection_id();
+}
+
+esp_gatt_if_t GattClientDescriptor::get_gattc_if() const
+{
+	return this->client->get_gattc_if();
+}
+
+GattClientDescriptor::GattClientDescriptor(GattClient & client, const esp_gattc_descr_elem_t & element) : client(&client), element(element) {}
+
+GattClientDescriptor::GattClientDescriptor(GattClientDescriptor&& obj)
+{
+	if (obj.client != nullptr) {
+		this->client = obj.client;
+		this->element = obj.element;
+		this->client->register_eventsink(this);
+	}
+}
+GattClientDescriptor::~GattClientDescriptor()
+{
+	if (this->client != nullptr) {
+		this->client->unregister_eventsink(this);
+	}
+}
+GattClientDescriptor& GattClientDescriptor::operator=(const GattClientDescriptor& rhs)
+{
+	if (this->client == nullptr) {
+		this->client = rhs.client;
+		this->element = rhs.element;
+		this->client->register_eventsink(this);
+	}
+	return *this;
+}
 
 freertos::future<esp_err_t> GattClientDescriptor::write_value_async(const uint8_t * buffer, size_t length)
 {
-	auto service_id = this->characteristic.service.get_id();
-	auto char_id = this->characteristic.get_id();
 	this->write_promise.reset();
-	esp_err_t result = esp_ble_gattc_write_char_descr(this->get_gattc_if(), this->get_connection_id(), &service_id, &char_id, &this->id, length, const_cast<uint8_t*>(buffer), ESP_GATT_WRITE_TYPE_RSP, ESP_GATT_AUTH_REQ_NONE);
+	esp_err_t result = esp_ble_gattc_write_char_descr(this->get_gattc_if(), this->get_connection_id(), this->element.handle, length, const_cast<uint8_t*>(buffer), ESP_GATT_WRITE_TYPE_RSP, ESP_GATT_AUTH_REQ_NONE);
 	if (result != ESP_OK) {
 		this->write_promise.set_value(result);
 	}
@@ -235,11 +339,11 @@ freertos::future<esp_err_t> GattClientDescriptor::write_value_async(const uint8_
 
 void GattClientDescriptor::handle_gattc_event(esp_gattc_cb_event_t event, esp_gatt_if_t gattc_if, esp_ble_gattc_cb_param_t * param)
 {
-	auto connection_id = this->characteristic.get_connection_id();
+	auto connection_id = this->get_connection_id();
 	switch (event)
 	{
 	case ESP_GATTC_WRITE_DESCR_EVT: {
-		if (param->write.conn_id == connection_id && param->write.char_id.inst_id == id.inst_id) {
+		if (param->write.conn_id == connection_id && param->write.handle == this->element.handle) {
 			if (this->write_promise.is_valid()) {
 				this->write_promise.set_value(param->write.status);
 			}

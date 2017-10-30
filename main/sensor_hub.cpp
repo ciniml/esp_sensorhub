@@ -6,6 +6,7 @@
 #include <vector>
 #include <map>
 #include <string>
+#include <thread>
 
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
@@ -31,6 +32,9 @@
 
 #include "freertos_future.hpp"
 #include "bluetooth_util.hpp"
+#include "gattclient.hpp"
+#include "gattclientservice.hpp"
+#include "gattclientcharacteristic.hpp"
 #include "lazy.hpp"
 
 //AWS IoTÇ…ê⁄ë±Ç∑ÇÈÇΩÇﬂÇÃèÿñæèë ( main/component.mkÇÃCOMPONENT_EMBED_TXTFILESÇ≈éwíË)
@@ -74,7 +78,7 @@ static bool get_localname_from_advdata(const uint8_t* advData, uint8_t advDataLe
 
 static unique_ptr<GattClient> gatt_client;
 static bool isFirstGapEvent = true;
-static shared_ptr<GattClientService> temperature_service;
+static GattClientService temperature_service;
 static const BluetoothUuid HumidityServiceUuid("F000AA20-0451-4000-B000-000000000000");
 static const BluetoothUuid HumidityDataCharacteristicUuid("F000AA21-0451-4000-B000-000000000000");
 static const BluetoothUuid HumidityConfigurationCharacteristicUuid("F000AA22-0451-4000-B000-000000000000");
@@ -96,11 +100,11 @@ static void handle_gap_event(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_
 			ESP_ERROR_CHECK(esp_ble_gap_stop_scanning());
 			memcpy(target_bdaddr, bda, sizeof(esp_bd_addr_t));
 			gatt_client->set_discovery_completed_handler([](GattClient& client) {
-				ESP_LOGI(TAG, "Discovery completed");
-				temperature_service = client.get_service(HumidityServiceUuid);
+				temperature_service = gatt_client->get_service(HumidityServiceUuid, 0);
 				if (!temperature_service) {
 					ESP_LOGE(TAG, "Failed to get temperature service.");
 				}
+				ESP_LOGI(TAG, "Discovery completed");
 			});
 			gatt_client->open(BdAddr(target_bdaddr));
 		}
@@ -283,34 +287,30 @@ static void aws_iot_task(void* param) {
 	ESP_ERROR_CHECK(esp_ble_gap_set_scan_params(&scan_params));
 	ESP_ERROR_CHECK(esp_ble_gap_start_scanning(60));   // Scan 60[s]
 
+	
 	while (!temperature_service) vTaskDelay(portTICK_PERIOD_MS);
 
-	ESP_LOGI(TAG, "Enumerating humidity characteristics");
-	auto result = temperature_service->enumerate_characteristics().get();
-	ESP_LOGI(TAG, "Enumeration complete! result=%x", result);
+	
 	{
 		ESP_LOGI(TAG, "Writing Configuration characteristic");
-		auto characteristic = temperature_service->get_characteristic(HumidityConfigurationCharacteristicUuid);
+		auto characteristic = temperature_service.get_characteristic(HumidityConfigurationCharacteristicUuid);
 		uint8_t value = 0x01;
-		auto result = characteristic->write_value_async(&value, 1).get();
+		auto result = characteristic.write_value_async(&value, 1).get();
 		ESP_LOGI(TAG, "Writing value complete. status=%x", result);
 	}
 	{
 		ESP_LOGI(TAG, "Writing Period characteristic");
-		auto characteristic = temperature_service->get_characteristic(HumidityPeriodCharacteristicUuid);
+		auto characteristic = temperature_service.get_characteristic(HumidityPeriodCharacteristicUuid);
 		uint8_t value = 200;
-		auto result = characteristic->write_value_async(&value, 1).get();
+		auto result = characteristic.write_value_async(&value, 1).get();
 		ESP_LOGI(TAG, "Writing value complete. status=%x", result);
 	}
 	{
 		sensor_data_queue.ensure();
 
-		auto characteristic = temperature_service->get_characteristic(HumidityDataCharacteristicUuid);
-		ESP_LOGI(TAG, "Enumerating descriptors...");
-		auto result = characteristic->enumerate_descriptors().get();
-		ESP_LOGI(TAG, "Enumerating descriptors completed. status=%x", result);
-
-		characteristic->set_notification_handler([](const uint8_t* data, size_t length) {
+		auto characteristic = temperature_service.get_characteristic(HumidityDataCharacteristicUuid);
+		
+		characteristic.set_notification_handler([](const uint8_t* data, size_t length) {
 			ESP_LOGI(TAG, "Notification. length=0x%x", length);
 			if (length == 4) {
 				int16_t raw_temp = static_cast<int16_t>(data[0] | (data[1] << 8));
@@ -323,12 +323,12 @@ static void aws_iot_task(void* param) {
 				sensor_data_queue->send(data);
 			}
 		});
-		result = characteristic->enable_notification_async(true).get();
+		auto result = characteristic.enable_notification_async(true).get();
 		ESP_LOGI(TAG, "Notification enabled. status=%x", result);
 
-		auto descriptor = characteristic->get_descriptor(NotificationDescriptorUuid);
+		auto descriptor = characteristic.get_descriptor(NotificationDescriptorUuid);
 		uint8_t value[2] = { 0x01, 0x00 };
-		result = descriptor->write_value_async(value, sizeof(value)).get();
+		result = descriptor.write_value_async(value, sizeof(value)).get();
 		ESP_LOGI(TAG, "Descriptor configured. status=%x", result);
 
 
