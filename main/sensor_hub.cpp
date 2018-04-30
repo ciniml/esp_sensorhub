@@ -17,7 +17,7 @@
 #include <esp_log.h>
 #include <nvs_flash.h>
 
-#include <bt.h>
+#include <esp_bt.h>
 #include <esp_bt_main.h>
 #include <esp_gap_ble_api.h>
 #include <esp_gatt_defs.h>
@@ -106,7 +106,7 @@ static void handle_gap_event(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_
 				}
 				ESP_LOGI(TAG, "Discovery completed");
 			});
-			gatt_client->open(BdAddr(target_bdaddr));
+			gatt_client->open(BdAddr(target_bdaddr), BLE_ADDR_TYPE_PUBLIC);
 		}
 		break;
 	}
@@ -310,7 +310,7 @@ static void aws_iot_task(void* param) {
 
 		auto characteristic = temperature_service.get_characteristic(HumidityDataCharacteristicUuid);
 		
-		characteristic.set_notification_handler([](const uint8_t* data, size_t length) {
+		characteristic.set_notification_handler([](const uint8_t* data, std::size_t length) {
 			ESP_LOGI(TAG, "Notification. length=0x%x", length);
 			if (length == 4) {
 				int16_t raw_temp = static_cast<int16_t>(data[0] | (data[1] << 8));

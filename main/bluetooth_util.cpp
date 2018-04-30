@@ -67,13 +67,11 @@ void GattClient::handle_gattc_event_inner(esp_gattc_cb_event_t event, esp_gatt_i
 	}
 	case ESP_GATTC_CONNECT_EVT: {
 		if (this->bd_addr == param->connect.remote_bda) {
-			if (param->connect.status == ESP_GATT_OK) {
-				this->state = State::Connected;
-				ESP_LOGI(TAG, "Device connected.");
-				esp_err_t result = esp_ble_gattc_search_service(this->gattc_if, this->conn_id, nullptr);
-				if (result != ESP_OK) {
-					ESP_LOGE(TAG, "esp_ble_gattc_search_service returned %d\n", result);
-				}
+			this->state = State::Connected;
+			ESP_LOGI(TAG, "Device connected.");
+			esp_err_t result = esp_ble_gattc_search_service(this->gattc_if, this->conn_id, nullptr);
+			if (result != ESP_OK) {
+				ESP_LOGE(TAG, "esp_ble_gattc_search_service returned %d\n", result);
 			}
 		}
 		break;
@@ -121,7 +119,7 @@ void GattClient::handle_gattc_event_inner(esp_gattc_cb_event_t event, esp_gatt_i
 }
 
 
-GattClientService GattClient::get_service(const BluetoothUuid& uuid, size_t index)
+GattClientService GattClient::get_service(const BluetoothUuid& uuid, std::size_t index)
 {
 	esp_gattc_service_elem_t element;
 	uint16_t count = 1;
@@ -158,7 +156,7 @@ esp_err_t GattClientCharacteristic::begin_read_value()
 	return esp_ble_gattc_read_char(this->get_gattc_if(), this->get_connection_id(), this->element.char_handle, ESP_GATT_AUTH_REQ_NONE);
 }
 
-freertos::future<esp_err_t> GattClientCharacteristic::write_value_async(const uint8_t* buffer, size_t length)
+freertos::future<esp_err_t> GattClientCharacteristic::write_value_async(const uint8_t* buffer, std::size_t length)
 {
 	this->value_write_promise.reset();
 	esp_err_t result = esp_ble_gattc_write_char(this->get_gattc_if(), this->get_connection_id(), this->element.char_handle, length, const_cast<uint8_t*>(buffer), ESP_GATT_WRITE_TYPE_RSP, ESP_GATT_AUTH_REQ_NONE);
@@ -327,7 +325,7 @@ GattClientDescriptor& GattClientDescriptor::operator=(const GattClientDescriptor
 	return *this;
 }
 
-freertos::future<esp_err_t> GattClientDescriptor::write_value_async(const uint8_t * buffer, size_t length)
+freertos::future<esp_err_t> GattClientDescriptor::write_value_async(const uint8_t * buffer, std::size_t length)
 {
 	this->write_promise.reset();
 	esp_err_t result = esp_ble_gattc_write_char_descr(this->get_gattc_if(), this->get_connection_id(), this->element.handle, length, const_cast<uint8_t*>(buffer), ESP_GATT_WRITE_TYPE_RSP, ESP_GATT_AUTH_REQ_NONE);

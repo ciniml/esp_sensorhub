@@ -47,8 +47,8 @@ private:
 	std::map<BluetoothUuid, std::shared_ptr<GattClientDescriptor>> descriptors;
 	freertos::single_promise<esp_err_t> enumerate_descriptors_promise;
 
-	std::function<void(const uint8_t* data, size_t length)> notification_handler;
-	std::function<void(esp_gatt_status_t, uint8_t*, size_t)> value_read_handler;
+	std::function<void(const uint8_t* data, std::size_t length)> notification_handler;
+	std::function<void(esp_gatt_status_t, uint8_t*, std::size_t)> value_read_handler;
 
 	freertos::single_promise<esp_err_t> value_write_promise;
 	freertos::single_promise<esp_err_t> enable_notification_promise;
@@ -68,7 +68,7 @@ public:
 	void set_value_read_handler(const THandler& handler) { this->value_read_handler = handler; }
 
 	esp_err_t begin_read_value();
-	freertos::future<esp_err_t> write_value_async(const uint8_t* buffer, size_t length);
+	freertos::future<esp_err_t> write_value_async(const uint8_t* buffer, std::size_t length);
 	freertos::future<esp_err_t> enable_notification_async(bool enable);
 
 	template<typename THandler>
@@ -98,7 +98,7 @@ private:
 	struct WriteContext
 	{
 		std::shared_ptr<uint8_t> data;
-		size_t length;
+		std::size_t length;
 	} write_context;
 	freertos::single_promise<esp_err_t> write_promise;
 
@@ -110,7 +110,7 @@ public:
 
 	BluetoothUuid get_uuid() const { return this->uuid; }
 	
-	freertos::future<esp_err_t> write_value_async(const uint8_t* buffer, size_t length);
+	freertos::future<esp_err_t> write_value_async(const uint8_t* buffer, std::size_t length);
 	
 	virtual void handle_gattc_event(esp_gattc_cb_event_t event, esp_gatt_if_t gattc_if, esp_ble_gattc_cb_param_t* param);
 

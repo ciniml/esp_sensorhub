@@ -109,12 +109,12 @@ public:
 	template<typename THandler> void set_discovery_completed_handler(THandler&& handler) { this->discovery_completed_handler = std::forward<THandler>(handler); }
 	template<typename THandler> void set_discovery_completed_handler(const THandler& handler) { this->discovery_completed_handler = handler; }
 
-	GattClientService get_service(const BluetoothUuid& uuid, size_t index);
+	GattClientService get_service(const BluetoothUuid& uuid, std::size_t index);
 
-	bool open(const BdAddr& bd_addr) {
+	bool open(const BdAddr& bd_addr, esp_ble_addr_type_t remote_addr_type) {
 		this->bd_addr = bd_addr;
 		this->state = State::Opening;
-		auto result = esp_ble_gattc_open(this->gattc_if, this->bd_addr.value, true);
+		auto result = esp_ble_gattc_open(this->gattc_if, this->bd_addr.value, remote_addr_type, true);
 		if (result != ESP_OK) {
 			ESP_LOGE(TAG, "Failed to open the device");
 			this->state = State::Closed;
