@@ -102,12 +102,60 @@ void HttpClient::initialize_parser_settings(http_parser_settings& settings)
 	settings.on_body = &response_parser_on_body;
 }
 
+bool HttpClient::receive_response(IHttpResponseReceiver& receiver)
+{
+	constexpr size_t BUFFER_SIZE = 2048;
+	std::unique_ptr<std::uint8_t> buffer(new std::uint8_t[BUFFER_SIZE]);
+	if (!buffer) {
+		ESP_LOGE(TAG, "failed to allocate read buffer.");
+		return false;
+	}
 
-bool HttpClient::get(const char * host, const char * port, const char * request, IHttpResponseReceiver& receiver)
+	// store handlers
+	this->parser_context.receiver = &receiver;
+
+	// Initialize response parser
+	http_parser_init(&this->response_parser, http_parser_type::HTTP_RESPONSE);
+	this->response_parser.data = this;
+	http_parser_settings settings;
+	this->initialize_parser_settings(settings);
+	
+	// Receive responses and parse them.
+	size_t bytes_remaining = 0;
+	while(true)
+	{
+		int ret = this->client.read(buffer.get() + bytes_remaining, BUFFER_SIZE - bytes_remaining);
+		ESP_LOGI(TAG, "client.read returned %d.", ret);
+		if (ret < 0) {
+			ESP_LOGE(TAG, "failed to read.");
+			this->client.disconnect();
+			return false;
+		}
+		
+		bytes_remaining += ret;
+		size_t bytes_processed = http_parser_execute(&this->response_parser, &settings, reinterpret_cast<char*>(buffer.get()), bytes_remaining);
+		
+		bytes_remaining -= bytes_processed;
+		if (bytes_remaining == 0 || (ret == 0 && bytes_processed == 0)) {
+			break;
+		}
+		if (bytes_remaining > 0) {
+			auto buffer_body = buffer.get();
+			std::memcpy(buffer_body, buffer_body + bytes_processed, bytes_remaining);
+		}
+	}
+
+	this->response_parser.data = nullptr;
+	this->client.disconnect();
+
+	return true;
+}
+
+bool HttpClient::get(const char* host, const char* port, const char* request, IHttpResponseReceiver& receiver)
 {
 	if (this->client.is_connected()) return false;
 
-	ESP_LOGI(TAG, "GET: %s:%s%s", host, port, request);
+	ESP_LOGD(TAG, "GET: %s:%s%s", host, port, request);
 
 	{
 		std::unique_ptr<char> buffer(new char[2048]);
@@ -129,54 +177,48 @@ bool HttpClient::get(const char * host, const char * port, const char * request,
 		this->client.write(reinterpret_cast<const std::uint8_t*>(head), p - head);
 	}
 
+	auto result = this->receive_response(receiver);
+	if( result ) {
+		ESP_LOGD(TAG, "GET: %s:%s%s completed", host, port, request);
+	}
+	return result;
+}
+
+
+bool HttpClient::post(const char* host, const char* port, const char* request, const char* content_type, const void* content, std::size_t content_length, IHttpResponseReceiver& receiver)
+{
+	if (this->client.is_connected()) return false;
+
+	ESP_LOGD(TAG, "POST: %s:%s%s", host, port, request);
+
 	{
-		constexpr size_t BUFFER_SIZE = 2048;
-		std::unique_ptr<std::uint8_t> buffer(new std::uint8_t[BUFFER_SIZE]);
-		if (!buffer) {
-			ESP_LOGE(TAG, "failed to allocate read buffer.");
+		std::unique_ptr<char> buffer(new char[2048]);
+		char* p = buffer.get();
+
+		if (!this->client.connect(host, port)) {
+			ESP_LOGE(TAG, "connection failed.");
 			return false;
 		}
 
-		// store handlers
-		this->parser_context.receiver = &receiver;
-
-		// Initialize response parser
-		http_parser_init(&this->response_parser, http_parser_type::HTTP_RESPONSE);
-		this->response_parser.data = this;
-		http_parser_settings settings;
-		this->initialize_parser_settings(settings);
+		p += sprintf(p, "POST %s HTTP/1.1\r\n", request);
+		p += sprintf(p, "Host: %s\r\n", host);
+		p += sprintf(p, "User-Agent: %s\r\n", this->user_agent.c_str());
+		p += sprintf(p, "Content-Type: %s\r\n", content_type);
+		p += sprintf(p, "Content-Length: %zu\r\n", content_length);
+		p += sprintf(p, "Connection: close\r\n");
+		p += sprintf(p, "Accept-Encoding: identity;q=1,chunked;q=0.1,*;q=0\r\n");
 		
-		// Receive responses and parse them.
-		size_t bytes_remaining = 0;
-		while(true)
-		{
-			int ret = this->client.read(buffer.get() + bytes_remaining, BUFFER_SIZE - bytes_remaining);
-			ESP_LOGI(TAG, "client.read returned %d.", ret);
-			if (ret < 0) {
-				ESP_LOGE(TAG, "failed to read.");
-				this->client.disconnect();
-				return false;
-			}
-			
-			bytes_remaining += ret;
-			size_t bytes_processed = http_parser_execute(&this->response_parser, &settings, reinterpret_cast<char*>(buffer.get()), bytes_remaining);
-			
-			bytes_remaining -= bytes_processed;
-			if (bytes_remaining == 0 || (ret == 0 && bytes_processed == 0)) {
-				break;
-			}
-			if (bytes_remaining > 0) {
-				auto buffer_body = buffer.get();
-				std::memcpy(buffer_body, buffer_body + bytes_processed, bytes_remaining);
-			}
-		}
+		strcat(p, "\r\n"); p += 2;
+
+		char* head = buffer.get();
+		this->client.write(reinterpret_cast<const std::uint8_t*>(head), p - head);
+		this->client.write(reinterpret_cast<const std::uint8_t*>(content), content_length);
 	}
-	
-	this->response_parser.data = nullptr;
 
-	this->client.disconnect();
-
-	ESP_LOGI(TAG, "GET: %s:%s%s completed", host, port, request);
+	auto result = this->receive_response(receiver);
+	if( result ) {
+		ESP_LOGD(TAG, "POST: %s:%s%s completed", host, port, request);
+	}
 
 	return true;
 }

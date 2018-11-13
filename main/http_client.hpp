@@ -60,10 +60,12 @@ private:
 	void initialize_parser_settings(http_parser_settings& settings);
 
 	bool write(const std::uint8_t* data, std::size_t length);
+	bool receive_response(IHttpResponseReceiver& receiver);
 public:
 	HttpClient(ClientType& client);
 
 	bool get(const char* host, const char* port, const char* request, IHttpResponseReceiver& receiver);
+	bool post(const char* host, const char* port, const char* request, const char* content_type, const void* content, std::size_t content_length, IHttpResponseReceiver& receiver);
 };
 
 #endif //HTTP_CLIENT_HPP__

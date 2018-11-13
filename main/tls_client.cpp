@@ -41,19 +41,28 @@ bool TlsClient::initialize(const  std::uint8_t* cert_pem, std::size_t cert_pem_l
 		return false;
 	}
 
-	//ret = mbedtls_x509_crt_parse(&this->cacert, cert_pem, cert_pem_length);
-	//if (ret < 0) {
-	//	ESP_LOGE(TAG, "mbedtls_x509_crt_parse failed. ret=0x%x", ret);
-	//	return false;
-	//}
+	if( cert_pem != nullptr ) {
+		ret = mbedtls_x509_crt_parse(&this->cacert, cert_pem, cert_pem_length);
+		if (ret < 0) {
+			ESP_LOGE(TAG, "mbedtls_x509_crt_parse failed. ret=0x%x", ret);
+			return false;
+		}
+	}
+	else {
+		ESP_LOGW(TAG, "cert_pem is not specified. Disable certificate verification. This may make this device vulnerable to MITM attacks.");
+	}
 
 	if ((ret = mbedtls_ssl_config_defaults(&this->ssl_config, MBEDTLS_SSL_IS_CLIENT, MBEDTLS_SSL_TRANSPORT_STREAM, MBEDTLS_SSL_PRESET_DEFAULT)) != 0) {
 		ESP_LOGE(TAG, "mbedtls_ssl_config_defaults failed. 0x%x", ret);
 		return false;
 	}
 
-	//mbedtls_ssl_conf_authmode(&this->ssl_config, MBEDTLS_SSL_VERIFY_REQUIRED);
-	mbedtls_ssl_conf_authmode(&this->ssl_config, MBEDTLS_SSL_VERIFY_OPTIONAL);
+	if( cert_pem == nullptr ) {
+		mbedtls_ssl_conf_authmode(&this->ssl_config, MBEDTLS_SSL_VERIFY_OPTIONAL);
+	}
+	else {
+		mbedtls_ssl_conf_authmode(&this->ssl_config, MBEDTLS_SSL_VERIFY_REQUIRED);
+	}
 	mbedtls_ssl_conf_ca_chain(&this->ssl_config, &this->cacert, nullptr);
 	mbedtls_ssl_conf_rng(&this->ssl_config, mbedtls_ctr_drbg_random, &this->ctr_drbg);
 

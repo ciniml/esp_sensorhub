@@ -24,12 +24,6 @@
 #include <esp_gattc_api.h>
 #include <esp_wifi.h>
 
-#include "aws_iot_config.h"
-#include "aws_iot_log.h"
-#include "aws_iot_version.h"
-#include "aws_iot_mqtt_client_interface.h"
-
-
 #include "freertos_future.hpp"
 #include "bluetooth_util.hpp"
 #include "gattclient.hpp"
@@ -42,24 +36,62 @@
 static TlsClient tls_client;					// TLS通信用のインスタンス
 static HttpClient http_client(tls_client);		// HTTP通信用インスタンス
 
-
-
-//AWS IoTに接続するための証明書 ( main/component.mkのCOMPONENT_EMBED_TXTFILESで指定)
-extern const uint8_t aws_root_ca_pem_start[] asm("_binary_aws_root_ca_pem_start");
-extern const uint8_t aws_root_ca_pem_end[] asm("_binary_aws_root_ca_pem_end");
-extern const uint8_t certificate_pem_crt_start[] asm("_binary_certificate_pem_crt_start");
-extern const uint8_t certificate_pem_crt_end[] asm("_binary_certificate_pem_crt_end");
-extern const uint8_t private_pem_key_start[] asm("_binary_private_pem_key_start");
-extern const uint8_t private_pem_key_end[] asm("_binary_private_pem_key_end");
-
-static char aws_iot_host_address[] = AWS_IOT_MQTT_HOST;
-static constexpr uint32_t aws_iot_port = AWS_IOT_MQTT_PORT;
-
 static const BluetoothUuid target_uuid("F0000000-0451-4000-B000-000000000000");
 
 using namespace std;
 static const char* TAG = "SENSORHUB";
 static const char TARGET_DEVICE_NAME[] = "CC2650 SensorTag";
+
+static char harvest_server_address[] = "api.soracom.io";
+//SORACOM Harvestに接続するための証明書 (main/component.mkのCOMPONENT_EMBED_TXTFILESで指定)
+extern const uint8_t api_soracom_io_crt_start[] asm("_binary_api_soracom_io_pem_start");
+extern const uint8_t api_soracom_io_crt_end[] asm("_binary_api_soracom_io_pem_end");
+//SORACOM Inventryで登録したデバイス情報
+extern const char inventry_device_start[] asm("_binary_device_txt_start");
+extern const char inventry_device_end[] asm("_binary_device_txt_end");
+static std::string makeSoracomHarvestEndpointUrl(const char* deviceId, const char* deviceSecret)
+{
+	const char* part0 = "/v1/devices/";
+	const char* part1 = "/publish?device_secret=";
+	std::size_t length = std::strlen(part0) + std::strlen(deviceId) + std::strlen(part1) + std::strlen(deviceSecret);
+	std::string result;
+	result.reserve(length);
+	result.append(part0);
+	result.append(deviceId);
+	result.append(part1);
+	result.append(deviceSecret);
+	return result;
+}
+static std::string getInventryDeviceId()
+{
+	std::string result;
+	result.reserve(32);
+	for(const char* p = inventry_device_start; p < inventry_device_end; p++) {
+		if( *p == ',' ) {
+			break;
+		}
+		else {
+			result.push_back(*p);
+		}
+	}
+	return result;
+}
+static std::string getInventryDeviceSecret()
+{
+	int column = 0;
+	std::string result;
+	result.reserve(32);
+	for(const char* p = inventry_device_start; p < inventry_device_end; p++) {
+		if( *p == ',' ) {
+			column++;
+		}
+		else if( column == 2 ) {
+			result.push_back(*p);
+		}
+	}
+	return result;
+}
+
 
 // HTTPレスポンスを解析するIHttpResponseReceiverの実装
 class ResponseReceiver : public IHttpResponseReceiver
@@ -72,7 +104,7 @@ private:
 	virtual int on_header_complete(const HttpClient&, const HttpResponseInfo& info) {
 		ESP_LOGI(TAG, "Header end. status code = %d", info.status_code);
 		ESP_LOGI(TAG, "Content-length = 0x%x", info.content_length);
-		this->is_success = info.status_code == 200;	// ステータスコードが200かどうかで成功・失敗を判定。
+		this->is_success = info.status_code == 201;	// SORACOM Harvestは成功すると201を返す
 		return 0;
 	}
 	virtual int on_header(const HttpClient&, const std::string& name, const std::string& value) {
@@ -81,6 +113,7 @@ private:
 	}
 	virtual int on_body(const HttpClient&, const std::uint8_t* buffer, std::size_t length) {
 		ESP_LOGI(TAG, "on_body: addr=%p, len=0x%x", buffer, length);
+		//ESP_LOGI(TAG, "data: %s", buffer);
 		return 0;
 	}
 public:
@@ -141,7 +174,10 @@ static void handle_gap_event(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_
 				}
 				ESP_LOGI(TAG, "Discovery completed");
 			});
-			gatt_client->open(BdAddr(target_bdaddr), BLE_ADDR_TYPE_PUBLIC);
+			if( !gatt_client->open(BdAddr(target_bdaddr), BLE_ADDR_TYPE_PUBLIC) ) {
+				// デバイスを開けなかったので再度スキャンする
+				ESP_ERROR_CHECK(esp_ble_gap_start_scanning(60));   // Scan 60[s]
+			}
 		}
 		break;
 	}
@@ -203,100 +239,10 @@ struct SensorData
 
 Lazy<freertos::WaitQueue<SensorData, 8>> sensor_data_queue;
 
-static void aws_iot_disconnect_handler(AWS_IoT_Client *pClient, void *data) {
-	ESP_LOGW(TAG, "MQTT Disconnect");
-	IoT_Error_t rc = FAILURE;
-
-	if (NULL == pClient) {
-		return;
-	}
-
-	if (aws_iot_is_autoreconnect_enabled(pClient)) {
-		ESP_LOGI(TAG, "Auto Reconnect is enabled, Reconnecting attempt will start now");
-	}
-	else {
-		ESP_LOGW(TAG, "Auto Reconnect not enabled. Starting manual reconnect...");
-		rc = aws_iot_mqtt_attempt_reconnect(pClient);
-		if (NETWORK_RECONNECTED == rc) {
-			ESP_LOGW(TAG, "Manual Reconnect Successful");
-		}
-		else {
-			ESP_LOGW(TAG, "Manual Reconnect Failed - %d", rc);
-		}
-	}
-}
-static void aws_iot_subscribe_callback_handler(AWS_IoT_Client *pClient, char *topicName, uint16_t topicNameLen,
-	IoT_Publish_Message_Params *params, void *pData) {
-	ESP_LOGI(TAG, "Subscribe callback");
-	ESP_LOGI(TAG, "%.*s\t%.*s", topicNameLen, topicName, (int)params->payloadLen, (char *)params->payload);
-}
-
-static void initialize_aws_iot(AWS_IoT_Client& client)
-{
-	int32_t i = 0;
-
-	IoT_Error_t rc = FAILURE;
+static void main_task(void* param) {
 	
-	IoT_Client_Init_Params mqttInitParams = iotClientInitParamsDefault;
-	IoT_Client_Connect_Params connectParams = iotClientConnectParamsDefault;
-
-	mqttInitParams.enableAutoReconnect = false;
-	mqttInitParams.pHostURL = aws_iot_host_address;
-	mqttInitParams.port = aws_iot_port;
-
-	mqttInitParams.pRootCALocation = (const char *)aws_root_ca_pem_start;
-	mqttInitParams.pDeviceCertLocation = (const char *)certificate_pem_crt_start;
-	mqttInitParams.pDevicePrivateKeyLocation = (const char *)private_pem_key_start;
-
-	mqttInitParams.mqttCommandTimeout_ms = 20000;
-	mqttInitParams.tlsHandshakeTimeout_ms = 5000;
-	mqttInitParams.isSSLHostnameVerify = true;
-	mqttInitParams.disconnectHandler = aws_iot_disconnect_handler;
-	mqttInitParams.disconnectHandlerData = NULL;
-
-	rc = aws_iot_mqtt_init(&client, &mqttInitParams);
-	if (SUCCESS != rc) {
-		ESP_LOGE(TAG, "aws_iot_mqtt_init returned error : %d ", rc);
-		abort();
-	}
-
-	connectParams.keepAliveIntervalInSec = 10;
-	connectParams.isCleanSession = true;
-	connectParams.MQTTVersion = MQTT_3_1_1;
-	connectParams.pClientID = CONFIG_AWS_CLIENT_ID;
-	connectParams.clientIDLen = (uint16_t)strlen(CONFIG_AWS_CLIENT_ID);
-	connectParams.isWillMsgPresent = false;
-
-	ESP_LOGI(TAG, "Connecting to AWS...");
-	do {
-		rc = aws_iot_mqtt_connect(&client, &connectParams);
-		if (rc != SUCCESS) {
-			ESP_LOGE(TAG, "Error(%d) connecting to %s:%d", rc, mqttInitParams.pHostURL, mqttInitParams.port);
-			vTaskDelay(pdMS_TO_TICKS(1000));
-		}
-	} while (rc != SUCCESS);
-
-	rc = aws_iot_mqtt_autoreconnect_set_status(&client, true);
-	if (SUCCESS != rc) {
-		ESP_LOGE(TAG, "Unable to set Auto Reconnect to true - %d", rc);
-		abort();
-	}
-	ESP_LOGI(TAG, "Connected to AWS");
-}
-
-static AWS_IoT_Client aws_iot_client;
-static volatile uint32_t super_buffer[128];
-
-static void aws_iot_task(void* param) {
-	
-	
-	// initialize AWS IoT connection
-	//initialize_aws_iot(aws_iot_client);
 	// Initialize TLS
-	{
-		uint8_t cert;
-		tls_client.initialize(&cert, 0);
-	}
+	tls_client.initialize(api_soracom_io_crt_start, api_soracom_io_crt_end - api_soracom_io_crt_start);
 
 	ESP_LOGI(TAG, "Initializing ESP Bluedroid...");
 
@@ -326,9 +272,7 @@ static void aws_iot_task(void* param) {
 	ESP_ERROR_CHECK(esp_ble_gap_set_scan_params(&scan_params));
 	ESP_ERROR_CHECK(esp_ble_gap_start_scanning(60));   // Scan 60[s]
 
-	
-	while (!temperature_service) vTaskDelay(portTICK_PERIOD_MS);
-
+	while (!temperature_service) { vTaskDelay(portTICK_PERIOD_MS); }
 	
 	{
 		ESP_LOGI(TAG, "Writing Configuration characteristic");
@@ -340,7 +284,7 @@ static void aws_iot_task(void* param) {
 	{
 		ESP_LOGI(TAG, "Writing Period characteristic");
 		auto characteristic = temperature_service.get_characteristic(HumidityPeriodCharacteristicUuid);
-		uint8_t value = 200;
+		uint8_t value = 200;	// 200*10[ms]
 		auto result = characteristic.write_value_async(&value, 1).get();
 		ESP_LOGI(TAG, "Writing value complete. status=%x", result);
 	}
@@ -371,45 +315,32 @@ static void aws_iot_task(void* param) {
 		ESP_LOGI(TAG, "Descriptor configured. status=%x", result);
 
 
-		unique_ptr<char> payload(new char[256]);
+		vector<char> payload;
+		payload.reserve(256);
+
+		auto inventryDeviceId = getInventryDeviceId();
+		auto inventryDeviceSecret = getInventryDeviceSecret();
+		auto harvestEndpoint = makeSoracomHarvestEndpointUrl(inventryDeviceId.c_str(), inventryDeviceSecret.c_str());
+
+		sensor_data_queue->reset();
 		while (true) {
-			IoT_Error_t rc;
-
-			ESP_LOGI(TAG, "process AWS IoT MQTT");
-			//rc = aws_iot_mqtt_yield(&aws_iot_client, 100);
-			//if (NETWORK_ATTEMPTING_RECONNECT == rc) {
-			//	// If the client is attempting to reconnect we will skip the rest of the loop.
-			//	sensor_data_queue->reset();
-			//	vTaskDelay(pdMS_TO_TICKS(1));
-			//	continue;
-			//}
-
+			const int averageSamples = 30;
 			SensorData data;
-			sensor_data_queue->receive(data);
-
-			/*const char *TOPIC = "test_topic/esp32";
-			const int TOPIC_LEN = strlen(TOPIC);
-			IoT_Publish_Message_Params params;
-
-			params.qos = QOS0;
-			params.payload = payload.get();
-			params.isRetained = 0;
-			params.payloadLen = sprintf(payload.get(), "{\"temp\":%f, \"hum\":%f}", data.temperature, data.humidity);
-			ESP_LOGI(TAG, "Publishing a message: %s", payload.get());
-			rc = aws_iot_mqtt_publish(&aws_iot_client, TOPIC, TOPIC_LEN, &params);
-
-			if (rc != SUCCESS) {
-				ESP_LOGE(TAG, "Failed to publish(rc=%d)", rc);
+			SensorData average = {0};
+			for(int i = 0; i < averageSamples; i++ ) {
+				sensor_data_queue->receive(data);
+				average.temperature += data.temperature;
+				average.humidity    += data.humidity;
 			}
-*/
-			ResponseReceiver response_parser;
-			unique_ptr<char> request_string(new char[2048]);
-			sprintf(request_string.get(), "%s&tmp=%f&hum=%f",
-				"/test?name=" "esp32",
-				data.temperature,
-				data.humidity);
+			average.temperature /= averageSamples;
+			average.humidity    /= averageSamples;
 
-			if (http_client.get("192.168.2.10", "443", request_string.get(), response_parser)) {
+			ResponseReceiver response_parser;
+			std::size_t payload_length = sprintf(payload.data(), 
+				"{\"tmp\":%f,\"hum\":%f}",
+				average.temperature,
+				average.humidity);
+			if (http_client.post(harvest_server_address, "443", harvestEndpoint.c_str(), "application/json", payload.data(), payload_length, response_parser)) {
 				if (!response_parser.get_is_success()) {
 					ESP_LOGE(TAG, "Failed to send sensor data.");
 				}
@@ -424,22 +355,8 @@ void app_main()
 {
 	ESP_ERROR_CHECK(nvs_flash_init());
 
-	printf("Hello world!\n");
-	/* Print chip information */
-	esp_chip_info_t chip_info;
-	esp_chip_info(&chip_info);
-	printf("This is ESP32 chip with %d CPU cores, WiFi%s%s, ",
-		chip_info.cores,
-		(chip_info.features & CHIP_FEATURE_BT) ? "/BT" : "",
-		(chip_info.features & CHIP_FEATURE_BLE) ? "/BLE" : "");
-
-	printf("silicon revision %d, ", chip_info.revision);
-
-	printf("%dMB %s flash\n", spi_flash_get_chip_size() / (1024 * 1024),
-		(chip_info.features & CHIP_FEATURE_EMB_FLASH) ? "embedded" : "external");
-
 	// Initialize WiFi connection
 	initialize_wifi();
 	
-	xTaskCreatePinnedToCore(&aws_iot_task, "aws_iot_task", 36*1024, NULL, 5, NULL, 0);
+	xTaskCreatePinnedToCore(&main_task, "main_task", 36*1024, NULL, 5, NULL, 0);
 }
