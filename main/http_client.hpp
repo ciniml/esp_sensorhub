@@ -36,9 +36,9 @@ public:
 	typedef TlsClient ClientType;
 private:
 	
-	static int response_parser_on_header_field(http_parser * parser, const char * at, size_t length);
-	static int response_parser_on_header_value(http_parser * parser, const char * at, size_t length);
-	static int response_parser_on_body(http_parser * parser, const char * at, size_t length);
+	static int response_parser_on_header_field(http_parser * parser, const char * at, std::size_t length);
+	static int response_parser_on_header_value(http_parser * parser, const char * at, std::size_t length);
+	static int response_parser_on_body(http_parser * parser, const char * at, std::size_t length);
 	static int response_parser_on_message_begin(http_parser * parser);
 	static int response_parser_on_message_complete(http_parser * parser);
 	static int response_parser_on_header_complete(http_parser * parser);
@@ -59,7 +59,7 @@ private:
 
 	void initialize_parser_settings(http_parser_settings& settings);
 
-	bool write(const std::uint8_t* data, size_t length);
+	bool write(const std::uint8_t* data, std::size_t length);
 public:
 	HttpClient(ClientType& client);
 

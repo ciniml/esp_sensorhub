@@ -164,6 +164,9 @@ freertos::future<esp_err_t> GattClientCharacteristic::write_value_async(const ui
 		ESP_LOGE(TAG, "esp_ble_gattc_write_char returned %d", result);
 		this->value_write_promise.set_value(result);
 	}
+	TaskHandle_t handle = xTaskGetCurrentTaskHandle();
+	char* taskName = pcTaskGetTaskName(handle);
+	ESP_LOGI(TAG, "return from write_value_async on task %s", taskName);
 	return this->value_write_promise.get_future();
 }
 
@@ -253,7 +256,9 @@ void GattClientCharacteristic::handle_gattc_event(esp_gattc_cb_event_t event, es
 		break;
 	}
 	case ESP_GATTC_WRITE_CHAR_EVT: {
-		ESP_LOGI(TAG, "WRITE_CHAR\n");
+		TaskHandle_t handle = xTaskGetCurrentTaskHandle();
+		char* taskName = pcTaskGetTaskName(handle);
+		ESP_LOGI(TAG, "WRITE_CHAR on task %s\n", taskName);
 		if (param->write.conn_id == connection_id && param->write.handle == this->element.char_handle) {
 			if (this->value_write_promise.is_valid()) {
 				this->value_write_promise.set_value(param->write.status);

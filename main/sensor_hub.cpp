@@ -37,7 +37,14 @@
 #include "gattclientcharacteristic.hpp"
 #include "lazy.hpp"
 
-//AWS IoT�ɐڑ����邽�߂̏ؖ��� ( main/component.mk��COMPONENT_EMBED_TXTFILES�Ŏw��)
+#include "tls_client.hpp"
+#include "http_client.hpp"
+static TlsClient tls_client;					// TLS通信用のインスタンス
+static HttpClient http_client(tls_client);		// HTTP通信用インスタンス
+
+
+
+//AWS IoTに接続するための証明書 ( main/component.mkのCOMPONENT_EMBED_TXTFILESで指定)
 extern const uint8_t aws_root_ca_pem_start[] asm("_binary_aws_root_ca_pem_start");
 extern const uint8_t aws_root_ca_pem_end[] asm("_binary_aws_root_ca_pem_end");
 extern const uint8_t certificate_pem_crt_start[] asm("_binary_certificate_pem_crt_start");
@@ -53,6 +60,34 @@ static const BluetoothUuid target_uuid("F0000000-0451-4000-B000-000000000000");
 using namespace std;
 static const char* TAG = "SENSORHUB";
 static const char TARGET_DEVICE_NAME[] = "CC2650 SensorTag";
+
+// HTTPレスポンスを解析するIHttpResponseReceiverの実装
+class ResponseReceiver : public IHttpResponseReceiver
+{
+private:
+	bool is_success;
+
+	virtual int on_message_begin(const HttpClient&) { ESP_LOGI(TAG, "Message begin"); return 0; }
+	virtual int on_message_complete(const HttpClient&) { ESP_LOGI(TAG, "Message end"); return 0; }
+	virtual int on_header_complete(const HttpClient&, const HttpResponseInfo& info) {
+		ESP_LOGI(TAG, "Header end. status code = %d", info.status_code);
+		ESP_LOGI(TAG, "Content-length = 0x%x", info.content_length);
+		this->is_success = info.status_code == 200;	// ステータスコードが200かどうかで成功・失敗を判定。
+		return 0;
+	}
+	virtual int on_header(const HttpClient&, const std::string& name, const std::string& value) {
+		ESP_LOGI(TAG, "%s: %s", name.c_str(), value.c_str());
+		return 0;
+	}
+	virtual int on_body(const HttpClient&, const std::uint8_t* buffer, std::size_t length) {
+		ESP_LOGI(TAG, "on_body: addr=%p, len=0x%x", buffer, length);
+		return 0;
+	}
+public:
+	ResponseReceiver() : is_success(false) {}
+
+	bool get_is_success() const { return this->is_success; }
+};
 
 static const uint16_t APP_ID = 1;
 static esp_gatt_if_t app_gattc_if = ESP_GATT_IF_NONE;
@@ -256,14 +291,20 @@ static void aws_iot_task(void* param) {
 	
 	
 	// initialize AWS IoT connection
-	initialize_aws_iot(aws_iot_client);
+	//initialize_aws_iot(aws_iot_client);
+	// Initialize TLS
+	{
+		uint8_t cert;
+		tls_client.initialize(&cert, 0);
+	}
 
 	ESP_LOGI(TAG, "Initializing ESP Bluedroid...");
 
 	esp_bt_controller_config_t bt_cfg = BT_CONTROLLER_INIT_CONFIG_DEFAULT();
 
+	ESP_ERROR_CHECK(esp_bt_controller_mem_release(ESP_BT_MODE_CLASSIC_BT));
 	ESP_ERROR_CHECK(esp_bt_controller_init(&bt_cfg));
-	ESP_ERROR_CHECK(esp_bt_controller_enable(ESP_BT_MODE_BTDM) != ESP_OK);
+	ESP_ERROR_CHECK(esp_bt_controller_enable(ESP_BT_MODE_BLE) != ESP_OK);
 	ESP_ERROR_CHECK(esp_bluedroid_init());
 	ESP_ERROR_CHECK(esp_bluedroid_enable());
 
@@ -281,8 +322,6 @@ static void aws_iot_task(void* param) {
 	scan_params.scan_window = 320;      // 200[ms]
 
 	gatt_client.reset(new GattClient(1));
-
-	printf("target_uuid: %s", target_uuid.str().c_str());
 
 	ESP_ERROR_CHECK(esp_ble_gap_set_scan_params(&scan_params));
 	ESP_ERROR_CHECK(esp_ble_gap_start_scanning(60));   // Scan 60[s]
@@ -337,18 +376,18 @@ static void aws_iot_task(void* param) {
 			IoT_Error_t rc;
 
 			ESP_LOGI(TAG, "process AWS IoT MQTT");
-			rc = aws_iot_mqtt_yield(&aws_iot_client, 100);
-			if (NETWORK_ATTEMPTING_RECONNECT == rc) {
-				// If the client is attempting to reconnect we will skip the rest of the loop.
-				sensor_data_queue->reset();
-				vTaskDelay(pdMS_TO_TICKS(1));
-				continue;
-			}
+			//rc = aws_iot_mqtt_yield(&aws_iot_client, 100);
+			//if (NETWORK_ATTEMPTING_RECONNECT == rc) {
+			//	// If the client is attempting to reconnect we will skip the rest of the loop.
+			//	sensor_data_queue->reset();
+			//	vTaskDelay(pdMS_TO_TICKS(1));
+			//	continue;
+			//}
 
 			SensorData data;
 			sensor_data_queue->receive(data);
 
-			const char *TOPIC = "test_topic/esp32";
+			/*const char *TOPIC = "test_topic/esp32";
 			const int TOPIC_LEN = strlen(TOPIC);
 			IoT_Publish_Message_Params params;
 
@@ -361,6 +400,19 @@ static void aws_iot_task(void* param) {
 
 			if (rc != SUCCESS) {
 				ESP_LOGE(TAG, "Failed to publish(rc=%d)", rc);
+			}
+*/
+			ResponseReceiver response_parser;
+			unique_ptr<char> request_string(new char[2048]);
+			sprintf(request_string.get(), "%s&tmp=%f&hum=%f",
+				"/test?name=" "esp32",
+				data.temperature,
+				data.humidity);
+
+			if (http_client.get("192.168.2.10", "443", request_string.get(), response_parser)) {
+				if (!response_parser.get_is_success()) {
+					ESP_LOGE(TAG, "Failed to send sensor data.");
+				}
 			}
 		}
 	}

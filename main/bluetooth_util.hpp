@@ -16,7 +16,7 @@
 #include "esp_spi_flash.h"
 #include "esp_log.h"
 
-#include "bt.h"
+#include "esp_bt.h"
 #include "esp_bt_main.h"
 #include "esp_gap_ble_api.h"
 #include "esp_gatt_defs.h"
@@ -72,7 +72,7 @@ struct BluetoothUuid
 	BluetoothUuid(const char* uuid) {
 		uint8_t octet = 0;
 
-		for (size_t index = 31; *uuid; --index, ++uuid) {
+		for (std::size_t index = 31; *uuid; --index, ++uuid) {
 			if (index == 23 || index == 19 || index == 15 || index == 11) {
 				++uuid;
 			}
