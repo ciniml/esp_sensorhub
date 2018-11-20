@@ -30,6 +30,7 @@
 #include "gattclientservice.hpp"
 #include "gattclientcharacteristic.hpp"
 #include "lazy.hpp"
+#include "string_utils.hpp"
 
 #include "tls_client.hpp"
 #include "http_client.hpp"
@@ -49,18 +50,14 @@ extern const uint8_t api_soracom_io_crt_end[] asm("_binary_api_soracom_io_pem_en
 //SORACOM Inventryで登録したデバイス情報
 extern const char inventry_device_start[] asm("_binary_device_txt_start");
 extern const char inventry_device_end[] asm("_binary_device_txt_end");
+
+
 static std::string makeSoracomHarvestEndpointUrl(const char* deviceId, const char* deviceSecret)
 {
-	const char* part0 = "/v1/devices/";
-	const char* part1 = "/publish?device_secret=";
-	std::size_t length = std::strlen(part0) + std::strlen(deviceId) + std::strlen(part1) + std::strlen(deviceSecret);
-	std::string result;
-	result.reserve(length);
-	result.append(part0);
-	result.append(deviceId);
-	result.append(part1);
-	result.append(deviceSecret);
-	return result;
+	static const ConstantString part0("/v1/devices/");
+	static const ConstantString part1("/publish?device_secret=");
+	
+	return concatStrings(part0, deviceId, part1, deviceSecret);
 }
 static std::string getInventryDeviceId()
 {
@@ -127,6 +124,71 @@ static esp_gatt_if_t app_gattc_if = ESP_GATT_IF_NONE;
 static bool isTargetDetected = false;
 static esp_bd_addr_t target_bdaddr = { 0 };
 
+static const char* NVS_NS_DEVICE = "device";
+static const char* NVS_KEY_DEVICE_ADDRESS = "address";
+
+/**
+ * @brief 接続対象のデバイス・アドレスをNVSから読み込む。
+ * @return アドレスが保存されていて読み込みが成功すればtrue。それ以外の場合はfalse。
+ */
+static bool load_target_device_address()
+{
+	nvs_handle handle;
+	auto err = nvs_open(NVS_NS_DEVICE, NVS_READWRITE, &handle);
+	if( err != ESP_OK ) {
+		ESP_LOGW(TAG, "Failed to open NVS namespace.");
+		return false;
+	}
+	size_t size = sizeof(esp_bd_addr_t);
+	uint8_t bda[sizeof(esp_bd_addr_t)];
+	err = nvs_get_blob(handle, NVS_KEY_DEVICE_ADDRESS, bda, &size);
+	nvs_close(handle);
+	if( err != ESP_OK ) {
+		ESP_LOGE(TAG, "No device address key were found.");
+		return false;
+	}
+	else if( size != sizeof(esp_bd_addr_t) ) {
+		ESP_LOGE(TAG, "Wrong device address size, size=%zu", size);
+		return false;
+	}
+	ESP_LOGI(TAG, "Using stored device address: %02x:%02x:%02x:%02x:%02x:%02x", bda[0], bda[1], bda[2], bda[3], bda[4], bda[5]);
+	memcpy(target_bdaddr, bda, sizeof(esp_bd_addr_t));
+	// 読み込んだアドレスがすべて0でないかどうかチェックする。
+	for(std::size_t i = 0; i < sizeof(esp_bd_addr_t); i++) {
+		if( bda[i] != 0 ) {
+			return true;
+		}
+	}
+	return false;
+}
+/**
+ * @brief 現在のデバイス・アドレスをNVSに保存する
+ * @return 保存処理が成功したらtrue。失敗したらfalse。
+ */
+static bool store_target_device_address()
+{
+	nvs_handle handle;
+	auto err = nvs_open(NVS_NS_DEVICE, NVS_READWRITE, &handle);
+	if( err != ESP_OK ) {
+		ESP_LOGW(TAG, "Failed to open NVS namespace.");
+		return false;
+	}
+	uint8_t* bda = reinterpret_cast<uint8_t*>(&target_bdaddr);
+	ESP_LOGI(TAG, "Using stored device address: %02x:%02x:%02x:%02x:%02x:%02x", bda[0], bda[1], bda[2], bda[3], bda[4], bda[5]);
+	err = nvs_set_blob(handle, NVS_KEY_DEVICE_ADDRESS, target_bdaddr, sizeof(esp_bd_addr_t));
+	if( err != ESP_OK ) {
+		nvs_close(handle);
+		ESP_LOGE(TAG, "Failed to store device address.");
+		return false;
+	}
+	err = nvs_commit(handle);
+	nvs_close(handle);
+	if( err != ESP_OK ) {
+		ESP_LOGE(TAG, "Failed to commit NVS change.");
+		return false;
+	}
+	return true;
+}
 static bool get_localname_from_advdata(const uint8_t* advData, uint8_t advDataLength, char* buffer)
 {
 	for (const uint8_t* adStructure = advData; adStructure - advData < advDataLength; adStructure += adStructure[0]) {
@@ -147,12 +209,42 @@ static bool get_localname_from_advdata(const uint8_t* advData, uint8_t advDataLe
 static unique_ptr<GattClient> gatt_client;
 static bool isFirstGapEvent = true;
 static GattClientService temperature_service;
+static GattClientService battery_service;
+static const BluetoothUuid BatteryServiceUuid(static_cast<uint16_t>(0x180f), true);
+static const BluetoothUuid BatteryLevelCharacteristicUuid(static_cast<uint16_t>(0x2a19), true);
+
 static const BluetoothUuid HumidityServiceUuid("F000AA20-0451-4000-B000-000000000000");
 static const BluetoothUuid HumidityDataCharacteristicUuid("F000AA21-0451-4000-B000-000000000000");
 static const BluetoothUuid HumidityConfigurationCharacteristicUuid("F000AA22-0451-4000-B000-000000000000");
 static const BluetoothUuid HumidityPeriodCharacteristicUuid("F000AA23-0451-4000-B000-000000000000");
 static const BluetoothUuid NotificationDescriptorUuid(static_cast<uint16_t>(0x2902u), true);
 
+static void connect_device(bool rescan_when_fail)
+{
+	gatt_client->set_discovery_completed_handler([](GattClient& client) {
+		temperature_service = gatt_client->get_service(HumidityServiceUuid, 0);
+		if(!temperature_service) {
+			ESP_LOGE(TAG, "Failed to get temperature service.");
+		}
+		battery_service = gatt_client->get_service(BatteryServiceUuid, 0);
+		if(!battery_service) {
+			ESP_LOGE(TAG, "Failed to get battery service.");
+		}
+		ESP_LOGI(TAG, "Discovery completed");
+	});
+	while( !gatt_client->open(BdAddr(target_bdaddr), BLE_ADDR_TYPE_PUBLIC) ) {
+		if( rescan_when_fail ) {
+			// デバイスを開けなかったので再度スキャンする
+			ESP_ERROR_CHECK(esp_ble_gap_start_scanning(60));   // Scan 60[s]
+			break;
+		}
+		else {
+			// デバイスを開けなかったので30秒待って再度接続する。
+			ESP_LOGE(TAG, "Failed to connect device. retry after 30[s].");
+			vTaskDelay(pdMS_TO_TICKS(30*1000));
+		}
+	}
+}
 static void handle_gap_event(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *param)
 {
 	switch (event)
@@ -167,23 +259,12 @@ static void handle_gap_event(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_
 			ESP_LOGI(TAG, "Target device was detected, ADDR=%02x:%02x:%02x:%02x:%02x:%02x", bda[0], bda[1], bda[2], bda[3], bda[4], bda[5]);
 			ESP_ERROR_CHECK(esp_ble_gap_stop_scanning());
 			memcpy(target_bdaddr, bda, sizeof(esp_bd_addr_t));
-			gatt_client->set_discovery_completed_handler([](GattClient& client) {
-				temperature_service = gatt_client->get_service(HumidityServiceUuid, 0);
-				if (!temperature_service) {
-					ESP_LOGE(TAG, "Failed to get temperature service.");
-				}
-				ESP_LOGI(TAG, "Discovery completed");
-			});
-			if( !gatt_client->open(BdAddr(target_bdaddr), BLE_ADDR_TYPE_PUBLIC) ) {
-				// デバイスを開けなかったので再度スキャンする
-				ESP_ERROR_CHECK(esp_ble_gap_start_scanning(60));   // Scan 60[s]
-			}
+			connect_device(true);
 		}
 		break;
 	}
 	case ESP_GAP_BLE_SCAN_START_COMPLETE_EVT: {
 		ESP_LOGI(TAG, "BLE Scan started. status=%x", param->scan_start_cmpl.status);
-		memset(target_bdaddr, 0, sizeof(esp_bd_addr_t));
 		break;
 	}
 	case ESP_GAP_BLE_SCAN_STOP_COMPLETE_EVT: {
@@ -257,23 +338,38 @@ static void main_task(void* param) {
 	// Initialize GattClient
 	GattClient::initialize();
 
-
-	static esp_ble_scan_params_t scan_params;
-	ESP_LOGI(TAG, "Initialzing ESP BLE...");
-	ESP_ERROR_CHECK(esp_ble_gap_register_callback(handle_gap_event));
-	scan_params.scan_type = BLE_SCAN_TYPE_ACTIVE;
-	scan_params.own_addr_type = BLE_ADDR_TYPE_PUBLIC;
-	scan_params.scan_filter_policy = BLE_SCAN_FILTER_ALLOW_ALL;
-	scan_params.scan_interval = 1600;   // 1[s]
-	scan_params.scan_window = 320;      // 200[ms]
-
 	gatt_client.reset(new GattClient(1));
 
-	ESP_ERROR_CHECK(esp_ble_gap_set_scan_params(&scan_params));
-	ESP_ERROR_CHECK(esp_ble_gap_start_scanning(60));   // Scan 60[s]
+	bool is_device_address_stored = load_target_device_address();
+	if( is_device_address_stored ) {
+		// 接続先デバイス・アドレスが保存されているので、接続する。
+		connect_device(false);
+	}
+	else {
+		// スキャンする。
+		memset(target_bdaddr, 0, sizeof(esp_bd_addr_t));
+		static esp_ble_scan_params_t scan_params;
+		ESP_LOGI(TAG, "Initialzing ESP BLE...");
+		ESP_ERROR_CHECK(esp_ble_gap_register_callback(handle_gap_event));
+		scan_params.scan_type = BLE_SCAN_TYPE_ACTIVE;
+		scan_params.own_addr_type = BLE_ADDR_TYPE_PUBLIC;
+		scan_params.scan_filter_policy = BLE_SCAN_FILTER_ALLOW_ALL;
+		scan_params.scan_interval = 1600;   // 1[s]
+	 	scan_params.scan_window = 320;      // 200[ms]
 
-	while (!temperature_service) { vTaskDelay(portTICK_PERIOD_MS); }
+		ESP_ERROR_CHECK(esp_ble_gap_set_scan_params(&scan_params));
+		ESP_ERROR_CHECK(esp_ble_gap_start_scanning(60));   // Scan 60[s]
+	}
 	
+	
+	// サービスの検出待ち
+	while (!temperature_service && !battery_service) { vTaskDelay(portTICK_PERIOD_MS); }
+
+	// 接続先デバイス・アドレスが保存されていなければ保存する。
+	if( !is_device_address_stored ) {
+		store_target_device_address();
+	}
+
 	{
 		ESP_LOGI(TAG, "Writing Configuration characteristic");
 		auto characteristic = temperature_service.get_characteristic(HumidityConfigurationCharacteristicUuid);
@@ -288,12 +384,36 @@ static void main_task(void* param) {
 		auto result = characteristic.write_value_async(&value, 1).get();
 		ESP_LOGI(TAG, "Writing value complete. status=%x", result);
 	}
+
+	volatile uint8_t battery_level = 0;
+	GattClientCharacteristic battery_characteristic = battery_service.get_characteristic(BatteryLevelCharacteristicUuid);
+	if( battery_service ) {
+		ESP_LOGI(TAG, "Enable battery level notification.");
+		battery_characteristic.set_notification_handler([&battery_level](const uint8_t* data, std::size_t length) {
+			if( length > 0 ) {
+				battery_level = *data;
+			}
+		});
+		battery_characteristic.set_value_read_handler([&battery_level](esp_gatt_status_t status, const uint8_t* data, std::size_t length) {
+			if( length > 0 ) {
+				battery_level = *data;
+			}
+		});
+		auto result = battery_characteristic.enable_notification_async(true).get();
+		ESP_LOGI(TAG, "Notification enabled. status=%x", result);
+		auto descriptor = battery_characteristic.get_descriptor(NotificationDescriptorUuid);
+		uint8_t value[2] = {0x01, 0x00};
+		result = descriptor.write_value_async(value, sizeof(value)).get();
+		ESP_LOGI(TAG, "Descriptor configured. status=%x", result);
+
+		battery_characteristic.begin_read_value();
+	}
+
+	GattClientCharacteristic temperature_characteristic = temperature_service.get_characteristic(HumidityDataCharacteristicUuid);
 	{
 		sensor_data_queue.ensure();
-
-		auto characteristic = temperature_service.get_characteristic(HumidityDataCharacteristicUuid);
 		
-		characteristic.set_notification_handler([](const uint8_t* data, std::size_t length) {
+		temperature_characteristic.set_notification_handler([](const uint8_t* data, std::size_t length) {
 			ESP_LOGI(TAG, "Notification. length=0x%x", length);
 			if (length == 4) {
 				int16_t raw_temp = static_cast<int16_t>(data[0] | (data[1] << 8));
@@ -306,14 +426,15 @@ static void main_task(void* param) {
 				sensor_data_queue->send(data);
 			}
 		});
-		auto result = characteristic.enable_notification_async(true).get();
+		auto result = temperature_characteristic.enable_notification_async(true).get();
 		ESP_LOGI(TAG, "Notification enabled. status=%x", result);
 
-		auto descriptor = characteristic.get_descriptor(NotificationDescriptorUuid);
+		auto descriptor = temperature_characteristic.get_descriptor(NotificationDescriptorUuid);
 		uint8_t value[2] = { 0x01, 0x00 };
 		result = descriptor.write_value_async(value, sizeof(value)).get();
 		ESP_LOGI(TAG, "Descriptor configured. status=%x", result);
-
+	}
+	{
 
 		vector<char> payload;
 		payload.reserve(256);
@@ -337,9 +458,10 @@ static void main_task(void* param) {
 
 			ResponseReceiver response_parser;
 			std::size_t payload_length = sprintf(payload.data(), 
-				"{\"tmp\":%f,\"hum\":%f}",
+				"{\"tmp\":%f,\"hum\":%f,\"bat\":%d}",
 				average.temperature,
-				average.humidity);
+				average.humidity,
+				battery_level);
 			if (http_client.post(harvest_server_address, "443", harvestEndpoint.c_str(), "application/json", payload.data(), payload_length, response_parser)) {
 				if (!response_parser.get_is_success()) {
 					ESP_LOGE(TAG, "Failed to send sensor data.");
@@ -353,10 +475,16 @@ extern "C" void app_main();
 
 void app_main()
 {
-	ESP_ERROR_CHECK(nvs_flash_init());
+	auto err = nvs_flash_init();
+	if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+		// ページ不足または新しいバージョンが見つかった場合はNVSをクリアする。
+        ESP_ERROR_CHECK(nvs_flash_erase());
+        err = nvs_flash_init();
+    }
+	ESP_ERROR_CHECK(err);
 
 	// Initialize WiFi connection
 	initialize_wifi();
 	
-	xTaskCreatePinnedToCore(&main_task, "main_task", 36*1024, NULL, 5, NULL, 0);
+	xTaskCreatePinnedToCore(&main_task, "main_task", 36*1024, NULL, 5, NULL, PRO_CPU_NUM);
 }

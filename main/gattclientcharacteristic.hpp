@@ -48,13 +48,14 @@ private:
 	freertos::single_promise<esp_err_t> enumerate_descriptors_promise;
 
 	std::function<void(const uint8_t* data, std::size_t length)> notification_handler;
-	std::function<void(esp_gatt_status_t, uint8_t*, std::size_t)> value_read_handler;
+	std::function<void(esp_gatt_status_t, const uint8_t*, std::size_t)> value_read_handler;
 
 	freertos::single_promise<esp_err_t> value_write_promise;
 	freertos::single_promise<esp_err_t> enable_notification_promise;
 public:
 	GattClientCharacteristic() : client(nullptr) {}
 	GattClientCharacteristic(GattClient& client, const esp_gattc_char_elem_t& element);
+	GattClientCharacteristic(const GattClientCharacteristic& obj);
 	GattClientCharacteristic(GattClientCharacteristic&&);
 	~GattClientCharacteristic();
 

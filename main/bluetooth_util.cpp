@@ -200,12 +200,21 @@ esp_gatt_if_t GattClientCharacteristic::get_gattc_if() const
 
 GattClientCharacteristic::GattClientCharacteristic(GattClient& client, const esp_gattc_char_elem_t& element) : client(&client), element(element) {}
 
+GattClientCharacteristic::GattClientCharacteristic(const GattClientCharacteristic& obj)
+{
+	this->client = obj.client;
+	this->element = obj.element;
+	this->client->register_eventsink(this);
+}
+
 GattClientCharacteristic::GattClientCharacteristic(GattClientCharacteristic&& obj)
 {
 	if (obj.client != nullptr) {
 		this->client = obj.client;
 		this->element = obj.element;
-		obj.client->register_eventsink(this);
+		this->client->register_eventsink(this);
+		obj.client->unregister_eventsink(&obj);
+		obj.client = nullptr;
 	}
 }
 GattClientCharacteristic::~GattClientCharacteristic()
@@ -216,9 +225,13 @@ GattClientCharacteristic::~GattClientCharacteristic()
 }
 GattClientCharacteristic& GattClientCharacteristic::operator=(const GattClientCharacteristic& rhs) 
 {
-	if (this->client == nullptr) {
+	if (this->client != nullptr) {
+		this->client->unregister_eventsink(this);
+		this->client = nullptr;
+	}
+	this->element = rhs.element;
+	if (rhs.client != nullptr) {
 		this->client = rhs.client;
-		this->element = rhs.element;
 		this->client->register_eventsink(this);
 	}
 	return *this;
@@ -312,6 +325,8 @@ GattClientDescriptor::GattClientDescriptor(GattClientDescriptor&& obj)
 		this->client = obj.client;
 		this->element = obj.element;
 		this->client->register_eventsink(this);
+		obj.client->unregister_eventsink(&obj);
+		obj.client = nullptr;
 	}
 }
 GattClientDescriptor::~GattClientDescriptor()
@@ -322,9 +337,13 @@ GattClientDescriptor::~GattClientDescriptor()
 }
 GattClientDescriptor& GattClientDescriptor::operator=(const GattClientDescriptor& rhs)
 {
-	if (this->client == nullptr) {
+	if (this->client != nullptr) {
+		this->client->unregister_eventsink(this);
+		this->client = nullptr;
+	}
+	this->element = rhs.element;
+	if (rhs.client != nullptr) {
 		this->client = rhs.client;
-		this->element = rhs.element;
 		this->client->register_eventsink(this);
 	}
 	return *this;

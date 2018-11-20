@@ -116,10 +116,10 @@ public:
 		this->state = State::Opening;
 		auto result = esp_ble_gattc_open(this->gattc_if, this->bd_addr.value, remote_addr_type, true);
 		if (result != ESP_OK) {
-			ESP_LOGE(TAG, "Failed to open the device");
+			ESP_LOGE(TAG, "Failed to open the device - err=%d", result);
 			this->state = State::Closed;
 		}
-		return result != ESP_OK;
+		return result == ESP_OK;
 	}
 	void close() {
 		esp_ble_gattc_close(this->gattc_if, this->conn_id);
