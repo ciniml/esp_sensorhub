@@ -32,10 +32,7 @@
 #include "lazy.hpp"
 #include "string_utils.hpp"
 
-#include "tls_client.hpp"
 #include "http_client.hpp"
-static TlsClient tls_client;					// TLS通信用のインスタンス
-static HttpClient http_client(tls_client);		// HTTP通信用インスタンス
 
 static const BluetoothUuid target_uuid("F0000000-0451-4000-B000-000000000000");
 
@@ -43,18 +40,19 @@ using namespace std;
 static const char* TAG = "SENSORHUB";
 static const char TARGET_DEVICE_NAME[] = "CC2650 SensorTag";
 
-static char harvest_server_address[] = "api.soracom.io";
 //SORACOM Harvestに接続するための証明書 (main/component.mkのCOMPONENT_EMBED_TXTFILESで指定)
-extern const uint8_t api_soracom_io_crt_start[] asm("_binary_api_soracom_io_pem_start");
-extern const uint8_t api_soracom_io_crt_end[] asm("_binary_api_soracom_io_pem_end");
+extern const char api_soracom_io_crt_start[] asm("_binary_api_soracom_io_pem_start");
+extern const char api_soracom_io_crt_end[] asm("_binary_api_soracom_io_pem_end");
 //SORACOM Inventryで登録したデバイス情報
 extern const char inventry_device_start[] asm("_binary_device_txt_start");
 extern const char inventry_device_end[] asm("_binary_device_txt_end");
 
+//
+static HttpClient http_client(api_soracom_io_crt_start);		// HTTP通信用インスタンス
 
 static std::string makeSoracomHarvestEndpointUrl(const char* deviceId, const char* deviceSecret)
 {
-	static const ConstantString part0("/v1/devices/");
+	static const ConstantString part0("https://api.soracom.io/v1/devices/");
 	static const ConstantString part1("/publish?device_secret=");
 	
 	return concatStrings(part0, deviceId, part1, deviceSecret);
@@ -94,29 +92,17 @@ static std::string getInventryDeviceSecret()
 class ResponseReceiver : public IHttpResponseReceiver
 {
 private:
-	bool is_success;
 
-	virtual int on_message_begin(const HttpClient&) { ESP_LOGI(TAG, "Message begin"); return 0; }
-	virtual int on_message_complete(const HttpClient&) { ESP_LOGI(TAG, "Message end"); return 0; }
-	virtual int on_header_complete(const HttpClient&, const HttpResponseInfo& info) {
-		ESP_LOGI(TAG, "Header end. status code = %d", info.status_code);
-		ESP_LOGI(TAG, "Content-length = 0x%x", info.content_length);
-		this->is_success = info.status_code == 201;	// SORACOM Harvestは成功すると201を返す
-		return 0;
-	}
 	virtual int on_header(const HttpClient&, const std::string& name, const std::string& value) {
 		ESP_LOGI(TAG, "%s: %s", name.c_str(), value.c_str());
 		return 0;
 	}
 	virtual int on_body(const HttpClient&, const std::uint8_t* buffer, std::size_t length) {
-		ESP_LOGI(TAG, "on_body: addr=%p, len=0x%x", buffer, length);
-		//ESP_LOGI(TAG, "data: %s", buffer);
+		//ESP_LOGI(TAG, "on_body: addr=%p, len=0x%x", buffer, length);
 		return 0;
 	}
 public:
-	ResponseReceiver() : is_success(false) {}
-
-	bool get_is_success() const { return this->is_success; }
+	ResponseReceiver() {}
 };
 
 static const uint16_t APP_ID = 1;
@@ -321,10 +307,6 @@ struct SensorData
 Lazy<freertos::WaitQueue<SensorData, 8>> sensor_data_queue;
 
 static void main_task(void* param) {
-	
-	// Initialize TLS
-	tls_client.initialize(api_soracom_io_crt_start, api_soracom_io_crt_end - api_soracom_io_crt_start);
-
 	ESP_LOGI(TAG, "Initializing ESP Bluedroid...");
 
 	esp_bt_controller_config_t bt_cfg = BT_CONTROLLER_INIT_CONFIG_DEFAULT();
@@ -457,14 +439,15 @@ static void main_task(void* param) {
 			average.humidity    /= averageSamples;
 
 			ResponseReceiver response_parser;
+			HttpResponseInfo response;
 			std::size_t payload_length = sprintf(payload.data(), 
 				"{\"tmp\":%f,\"hum\":%f,\"bat\":%d}",
 				average.temperature,
 				average.humidity,
 				battery_level);
-			if (http_client.post(harvest_server_address, "443", harvestEndpoint.c_str(), "application/json", payload.data(), payload_length, response_parser)) {
-				if (!response_parser.get_is_success()) {
-					ESP_LOGE(TAG, "Failed to send sensor data.");
+			if (http_client.perform(HTTP_METHOD_POST, harvestEndpoint.c_str(), "application/json", payload.data(), payload_length, response_parser, response)) {
+				if (response.status_code < 200 || response.status_code >= 300) {
+					ESP_LOGE(TAG, "Failed to send sensor data. status_code=%03d", response.status_code);
 				}
 			}
 		}
@@ -476,8 +459,8 @@ extern "C" void app_main();
 void app_main()
 {
 	auto err = nvs_flash_init();
-	if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-		// ページ不足または新しいバージョンが見つかった場合はNVSをクリアする。
+	if (err == ESP_ERR_NVS_NO_FREE_PAGES) {
+		// ページ不足の場合はNVSをクリアする。
         ESP_ERROR_CHECK(nvs_flash_erase());
         err = nvs_flash_init();
     }

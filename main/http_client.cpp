@@ -5,220 +5,114 @@
 #include <memory>
 #include <cstring>
 
-const char* HttpClient::TAG = "HttpClient";
+static const char* TAG = "HttpClient";
 
+HttpClient::HttpClient() : cert_pem(nullptr) {}
+HttpClient::HttpClient(const char* cert_pem) : cert_pem(cert_pem) {}
 
-bool HttpClient::write(const std::uint8_t * data, size_t length)
+class HttpClientHandlerInvoker
 {
-	if (this->client.is_connected()) return false;
-
-	size_t remaining = length;
-	const std::uint8_t* p = data;
-
-	while (remaining > 0) {
-		int result = this->client.write(p, remaining);
-		if (result < 0) return false;
-
-		remaining -= result;
-		p += result;
+public:
+	static esp_err_t http_event_handler(esp_http_client_event_t* evt)
+	{
+		auto self = static_cast<HttpClient*>(evt->user_data);
+		if( self != nullptr ) {
+			return self->handle_event(evt);
+		}
+		else {
+			return ESP_OK;
+		}
 	}
-	return true;
-}
+};
 
-HttpClient::HttpClient(ClientType & client) : client(client), user_agent("ESP32 HTTP Client")
+esp_err_t HttpClient::handle_event(esp_http_client_event_t* evt)
 {
-	this->parser_context.client = this;
-}
-
-int HttpClient::response_parser_on_header_field(http_parser* parser, const char *at, size_t length)
-{
-	HttpClient* self = reinterpret_cast<HttpClient*>(parser->data);
-	self->parser_context.header_name.clear();
-	self->parser_context.header_name.append(at, length);
-	return 0;
-}
-int HttpClient::response_parser_on_header_value(http_parser* parser, const char *at, size_t length)
-{
-	HttpClient* self = reinterpret_cast<HttpClient*>(parser->data);
-	self->parser_context.header_value.clear();
-	self->parser_context.header_value.append(at, length);
-	if (self->parser_context.receiver != nullptr) {
-		return self->parser_context.receiver->on_header(*self, self->parser_context.header_name, self->parser_context.header_value);
+	switch(evt->event_id) {
+	case HTTP_EVENT_ERROR:
+		ESP_LOGE(TAG, "HTTP_EVENT_ERROR");
+		break;
+	case HTTP_EVENT_ON_CONNECTED:
+		ESP_LOGD(TAG, "HTTP_EVENT_ON_CONNECTED");
+		break;
+	case HTTP_EVENT_HEADER_SENT:
+		ESP_LOGD(TAG, "HTTP_EVENT_HEADER_SENT");
+		break;
+	case HTTP_EVENT_ON_HEADER:
+	{
+		if( evt->header_key != nullptr ) {
+			if( evt->header_value != nullptr ) {
+				ESP_LOGD(TAG, "HTTP_EVENT_ON_HEADER: %s=%s", evt->header_key, evt->header_value);
+			}
+			else {
+				ESP_LOGD(TAG, "HTTP_EVENT_ON_HEADER: %s", evt->header_key);
+			}
+			if( this->receiver != nullptr ) {
+				this->receiver->on_header(*this, evt->header_key, evt->header_value);
+			}
+		}
+		break;
 	}
-	return 0;
-}
-
-int HttpClient::response_parser_on_body(http_parser* parser, const char *at, size_t length)
-{
-	HttpClient* self = reinterpret_cast<HttpClient*>(parser->data);
-	if (self->parser_context.receiver != nullptr) {
-		return self->parser_context.receiver->on_body(*self, reinterpret_cast<const std::uint8_t*>(at), length);
+	case HTTP_EVENT_ON_DATA:
+	{
+		auto data = reinterpret_cast<std::uint8_t*>(evt->data);
+		if( data != nullptr ) {
+			ESP_LOGD(TAG, "HTTP_EVENT_ON_HEADER %.*s", evt->data_len, data);
+		}
+		if( this->receiver != nullptr ) {
+			this->receiver->on_body(*this, data, evt->data_len);
+		}
+		break;
 	}
-	return 0;
-}
-
-int HttpClient::response_parser_on_message_begin(http_parser* parser)
-{
-	HttpClient* self = reinterpret_cast<HttpClient*>(parser->data);
-	if (self->parser_context.receiver != nullptr) {
-		return self->parser_context.receiver->on_message_begin(*self);
+	case HTTP_EVENT_ON_FINISH:
+		ESP_LOGD(TAG, "HTTP_EVENT_ON_FINISH");
+		break;
+	case HTTP_EVENT_DISCONNECTED:
+		ESP_LOGD(TAG, "HTTP_EVENT_DISCONNECTED");
+		break;
 	}
-	return 0;
+	return ESP_OK;
 }
 
-int HttpClient::response_parser_on_message_complete(http_parser* parser)
+typedef std::unique_ptr<struct esp_http_client, decltype(&esp_http_client_cleanup)> HttpClientHandle;
+
+bool HttpClient::perform(esp_http_client_method_t method, const char* url, const char* content_type, const void* content, std::size_t content_length, IHttpResponseReceiver& receiver, HttpResponseInfo& response)
 {
-	HttpClient* self = reinterpret_cast<HttpClient*>(parser->data);
-	if (self->parser_context.receiver != nullptr) {
-		return self->parser_context.receiver->on_message_complete(*self);
+	memset(&this->config, 0, sizeof(this->config));
+	this->config.user_data = this;
+	this->config.event_handler = HttpClientHandlerInvoker::http_event_handler;
+	this->config.url = url;
+	this->config.cert_pem = this->cert_pem;
+	this->config.method = method;
+	
+	if( content_type != nullptr ) {
+		content_type = "application/json";
 	}
-	return 0;
-}
 
-int HttpClient::response_parser_on_header_complete(http_parser* parser)
-{
-	HttpClient* self = reinterpret_cast<HttpClient*>(parser->data);
-	if (self->parser_context.receiver != nullptr) {
-		HttpResponseInfo info;
-		info.http_major		= parser->http_major ;
-		info.http_minor		= parser->http_minor ;
-		info.http_errno		= parser->http_errno ;
-		info.status_code	= parser->status_code;
-		info.content_length = parser->content_length;
-
-		return self->parser_context.receiver->on_header_complete(*self, info);
-	}
-	return 0;
-}
-
-void HttpClient::initialize_parser_settings(http_parser_settings& settings)
-{
-	http_parser_settings_init(&settings);
-	settings.on_message_begin = &response_parser_on_message_begin;
-	settings.on_message_complete = &response_parser_on_message_complete;
-	settings.on_headers_complete = &response_parser_on_header_complete;
-	settings.on_header_field = &response_parser_on_header_field;
-	settings.on_header_value = &response_parser_on_header_value;
-	settings.on_body = &response_parser_on_body;
-}
-
-bool HttpClient::receive_response(IHttpResponseReceiver& receiver)
-{
-	constexpr size_t BUFFER_SIZE = 2048;
-	std::unique_ptr<std::uint8_t> buffer(new std::uint8_t[BUFFER_SIZE]);
-	if (!buffer) {
-		ESP_LOGE(TAG, "failed to allocate read buffer.");
+	HttpClientHandle client(esp_http_client_init(&this->config), &esp_http_client_cleanup);
+	if( !client ) {
+		ESP_LOGE(TAG, "Error: failed to initialize HTTP client");
 		return false;
 	}
 
-	// store handlers
-	this->parser_context.receiver = &receiver;
-
-	// Initialize response parser
-	http_parser_init(&this->response_parser, http_parser_type::HTTP_RESPONSE);
-	this->response_parser.data = this;
-	http_parser_settings settings;
-	this->initialize_parser_settings(settings);
-	
-	// Receive responses and parse them.
-	size_t bytes_remaining = 0;
-	while(true)
-	{
-		int ret = this->client.read(buffer.get() + bytes_remaining, BUFFER_SIZE - bytes_remaining);
-		ESP_LOGI(TAG, "client.read returned %d.", ret);
-		if (ret < 0) {
-			ESP_LOGE(TAG, "failed to read.");
-			this->client.disconnect();
+	esp_err_t err = ESP_OK;
+	if( content != nullptr ) {
+		err = esp_http_client_set_header(client.get(), "Content-Type", content_type);
+		if( err != ESP_OK ) {
+			ESP_LOGE(TAG, "Error: failed to set content-type field err=%d", err);
 			return false;
 		}
-		
-		bytes_remaining += ret;
-		size_t bytes_processed = http_parser_execute(&this->response_parser, &settings, reinterpret_cast<char*>(buffer.get()), bytes_remaining);
-		
-		bytes_remaining -= bytes_processed;
-		if (bytes_remaining == 0 || (ret == 0 && bytes_processed == 0)) {
-			break;
-		}
-		if (bytes_remaining > 0) {
-			auto buffer_body = buffer.get();
-			std::memcpy(buffer_body, buffer_body + bytes_processed, bytes_remaining);
-		}
-	}
-
-	this->response_parser.data = nullptr;
-	this->client.disconnect();
-
-	return true;
-}
-
-bool HttpClient::get(const char* host, const char* port, const char* request, IHttpResponseReceiver& receiver)
-{
-	if (this->client.is_connected()) return false;
-
-	ESP_LOGD(TAG, "GET: %s:%s%s", host, port, request);
-
-	{
-		std::unique_ptr<char> buffer(new char[2048]);
-		char* p = buffer.get();
-
-		if (!this->client.connect(host, port)) {
-			ESP_LOGE(TAG, "connection failed.");
+		err = esp_http_client_set_post_field(client.get(), reinterpret_cast<const char*>(content), content_length);
+		if( err != ESP_OK ) {
+			ESP_LOGE(TAG, "Error: failed to set post field err=%d", err);
 			return false;
 		}
-
-		p += sprintf(p, "GET %s HTTP/1.1\r\n", request);
-		p += sprintf(p, "Host: %s\r\n", host);
-		p += sprintf(p, "User-Agent: %s\r\n", this->user_agent.c_str());
-		p += sprintf(p, "Connection: close\r\n");
-		p += sprintf(p, "Accept-Encoding: identity;q=1,chunked;q=0.1,*;q=0\r\n");
-		strcat(p, "\r\n"); p += 2;
-
-		char* head = buffer.get();
-		this->client.write(reinterpret_cast<const std::uint8_t*>(head), p - head);
+	}
+	err = esp_http_client_perform(client.get());
+	if( err != ESP_OK ) {
+		ESP_LOGE(TAG, "Error: failed to perform HTTP request err=%d", err);
 	}
 
-	auto result = this->receive_response(receiver);
-	if( result ) {
-		ESP_LOGD(TAG, "GET: %s:%s%s completed", host, port, request);
-	}
-	return result;
-}
-
-
-bool HttpClient::post(const char* host, const char* port, const char* request, const char* content_type, const void* content, std::size_t content_length, IHttpResponseReceiver& receiver)
-{
-	if (this->client.is_connected()) return false;
-
-	ESP_LOGD(TAG, "POST: %s:%s%s", host, port, request);
-
-	{
-		std::unique_ptr<char> buffer(new char[2048]);
-		char* p = buffer.get();
-
-		if (!this->client.connect(host, port)) {
-			ESP_LOGE(TAG, "connection failed.");
-			return false;
-		}
-
-		p += sprintf(p, "POST %s HTTP/1.1\r\n", request);
-		p += sprintf(p, "Host: %s\r\n", host);
-		p += sprintf(p, "User-Agent: %s\r\n", this->user_agent.c_str());
-		p += sprintf(p, "Content-Type: %s\r\n", content_type);
-		p += sprintf(p, "Content-Length: %zu\r\n", content_length);
-		p += sprintf(p, "Connection: close\r\n");
-		p += sprintf(p, "Accept-Encoding: identity;q=1,chunked;q=0.1,*;q=0\r\n");
-		
-		strcat(p, "\r\n"); p += 2;
-
-		char* head = buffer.get();
-		this->client.write(reinterpret_cast<const std::uint8_t*>(head), p - head);
-		this->client.write(reinterpret_cast<const std::uint8_t*>(content), content_length);
-	}
-
-	auto result = this->receive_response(receiver);
-	if( result ) {
-		ESP_LOGD(TAG, "POST: %s:%s%s completed", host, port, request);
-	}
-
-	return true;
+	response.status_code    = esp_http_client_get_status_code(client.get());
+	response.content_length = esp_http_client_get_content_length(client.get());
+	return err == ESP_OK;
 }
