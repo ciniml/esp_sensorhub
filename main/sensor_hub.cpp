@@ -218,6 +218,7 @@ static void connect_device(bool rescan_when_fail)
 		}
 		ESP_LOGI(TAG, "Discovery completed");
 	});
+	
 	while( !gatt_client->open(BdAddr(target_bdaddr), BLE_ADDR_TYPE_PUBLIC) ) {
 		if( rescan_when_fail ) {
 			// デバイスを開けなかったので再度スキャンする
@@ -247,6 +248,16 @@ static void handle_gap_event(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_
 			memcpy(target_bdaddr, bda, sizeof(esp_bd_addr_t));
 			connect_device(true);
 		}
+		break;
+	}
+	case ESP_GAP_BLE_UPDATE_CONN_PARAMS_EVT: {
+		ESP_LOGI(TAG, "Update conn params. status=%d, min_int=%d, max_int=%d, latency=%d, conn_int=%d, timeout=%d", 
+			param->update_conn_params.status,
+			param->update_conn_params.min_int,
+			param->update_conn_params.max_int,
+			param->update_conn_params.latency,
+			param->update_conn_params.conn_int,
+			param->update_conn_params.timeout);
 		break;
 	}
 	case ESP_GAP_BLE_SCAN_START_COMPLETE_EVT: {
@@ -317,6 +328,9 @@ static void main_task(void* param) {
 	ESP_ERROR_CHECK(esp_bluedroid_init());
 	ESP_ERROR_CHECK(esp_bluedroid_enable());
 
+	// GAPのイベント・ハンドラを設定する。
+	ESP_ERROR_CHECK(esp_ble_gap_register_callback(handle_gap_event));
+
 	// Initialize GattClient
 	GattClient::initialize();
 
@@ -332,7 +346,6 @@ static void main_task(void* param) {
 		memset(target_bdaddr, 0, sizeof(esp_bd_addr_t));
 		static esp_ble_scan_params_t scan_params;
 		ESP_LOGI(TAG, "Initialzing ESP BLE...");
-		ESP_ERROR_CHECK(esp_ble_gap_register_callback(handle_gap_event));
 		scan_params.scan_type = BLE_SCAN_TYPE_ACTIVE;
 		scan_params.own_addr_type = BLE_ADDR_TYPE_PUBLIC;
 		scan_params.scan_filter_policy = BLE_SCAN_FILTER_ALLOW_ALL;
@@ -346,7 +359,7 @@ static void main_task(void* param) {
 	
 	// サービスの検出待ち
 	while (!temperature_service && !battery_service) { vTaskDelay(portTICK_PERIOD_MS); }
-
+	
 	// 接続先デバイス・アドレスが保存されていなければ保存する。
 	if( !is_device_address_stored ) {
 		store_target_device_address();
@@ -415,6 +428,20 @@ static void main_task(void* param) {
 		uint8_t value[2] = { 0x01, 0x00 };
 		result = descriptor.write_value_async(value, sizeof(value)).get();
 		ESP_LOGI(TAG, "Descriptor configured. status=%x", result);
+	}
+	{
+		// 接続パラメータを更新する。
+		esp_ble_conn_update_params_t conn_params = {0};
+		memcpy(conn_params.bda, target_bdaddr, sizeof(esp_bd_addr_t));
+		conn_params.min_int = static_cast<uint16_t>(500.0/1.25);
+		conn_params.max_int = static_cast<uint16_t>(2000.0/1.25);
+		conn_params.latency = 0;
+		conn_params.timeout = static_cast<uint16_t>(20000.0/10.0);
+		
+		auto err = esp_ble_gap_update_conn_params(&conn_params);
+		if( err != ESP_OK ) {
+			ESP_LOGE(TAG, "Failed to update connection parameters - %d", err);
+		}
 	}
 	{
 
