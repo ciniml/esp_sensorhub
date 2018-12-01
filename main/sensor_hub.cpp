@@ -205,13 +205,20 @@ static const BluetoothUuid HumidityConfigurationCharacteristicUuid("F000AA22-045
 static const BluetoothUuid HumidityPeriodCharacteristicUuid("F000AA23-0451-4000-B000-000000000000");
 static const BluetoothUuid NotificationDescriptorUuid(static_cast<uint16_t>(0x2902u), true);
 
+/**
+ * @brief 対象のBLEデバイスに接続する
+ * @param[in] rescan_when_fail trueの場合、接続失敗時に再度スキャンを開始する
+ */
 static void connect_device(bool rescan_when_fail)
 {
+	// デバイスのサービスの検索が終わった時のハンドラを設定する
 	gatt_client->set_discovery_completed_handler([](GattClient& client) {
+		// Humidity Serviceを取得する
 		temperature_service = gatt_client->get_service(HumidityServiceUuid, 0);
 		if(!temperature_service) {
 			ESP_LOGE(TAG, "Failed to get temperature service.");
 		}
+		// Battery Serviceを取得する
 		battery_service = gatt_client->get_service(BatteryServiceUuid, 0);
 		if(!battery_service) {
 			ESP_LOGE(TAG, "Failed to get battery service.");
@@ -219,6 +226,7 @@ static void connect_device(bool rescan_when_fail)
 		ESP_LOGI(TAG, "Discovery completed");
 	});
 	
+	// 見つけたデバイスを開けなかった場合
 	while( !gatt_client->open(BdAddr(target_bdaddr), BLE_ADDR_TYPE_PUBLIC) ) {
 		if( rescan_when_fail ) {
 			// デバイスを開けなかったので再度スキャンする
@@ -232,14 +240,20 @@ static void connect_device(bool rescan_when_fail)
 		}
 	}
 }
+
+/**
+ * @brief GAPイベントのハンドラ
+ * @param[in] event イベントの番号
+ * @param[in] param イベントの情報
+ */
 static void handle_gap_event(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *param)
 {
 	switch (event)
 	{
-	case ESP_GAP_BLE_SCAN_RESULT_EVT: {
+	case ESP_GAP_BLE_SCAN_RESULT_EVT: {	// スキャン結果を1項目受け取った
 		uint8_t* bda = param->scan_rst.bda;
 		char localname[ESP_BLE_ADV_DATA_LEN_MAX];
-
+		// アドバタイジング・データからローカル・ネームを取得する(含まれていなければ空文字)
 		get_localname_from_advdata(param->scan_rst.ble_adv + param->scan_rst.adv_data_len, param->scan_rst.scan_rsp_len, localname);
 		ESP_LOGI(TAG, "SCAN_RESULT: ADDR=%02x:%02x:%02x:%02x:%02x:%02x, NAME:%s, RSSI:%d", bda[0], bda[1], bda[2], bda[3], bda[4], bda[5], localname, param->scan_rst.rssi);
 		if (strcmp(localname, TARGET_DEVICE_NAME) == 0) {
@@ -250,7 +264,7 @@ static void handle_gap_event(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_
 		}
 		break;
 	}
-	case ESP_GAP_BLE_UPDATE_CONN_PARAMS_EVT: {
+	case ESP_GAP_BLE_UPDATE_CONN_PARAMS_EVT: {	// 接続パラメータの更新結果
 		ESP_LOGI(TAG, "Update conn params. status=%d, min_int=%d, max_int=%d, latency=%d, conn_int=%d, timeout=%d", 
 			param->update_conn_params.status,
 			param->update_conn_params.min_int,
@@ -260,25 +274,33 @@ static void handle_gap_event(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_
 			param->update_conn_params.timeout);
 		break;
 	}
-	case ESP_GAP_BLE_SCAN_START_COMPLETE_EVT: {
+	case ESP_GAP_BLE_SCAN_START_COMPLETE_EVT: {	// スキャン開始
 		ESP_LOGI(TAG, "BLE Scan started. status=%x", param->scan_start_cmpl.status);
 		break;
 	}
-	case ESP_GAP_BLE_SCAN_STOP_COMPLETE_EVT: {
+	case ESP_GAP_BLE_SCAN_STOP_COMPLETE_EVT: {	// スキャン停止
 		ESP_LOGI(TAG, "Scanning stopped.");
 	}
 	default: break;
 	}
 }
 
+// Wi-Fi接続完了を通知するイベント
 static std::unique_ptr<freertos::WaitEvent> event_wifi_got_ip;
 
+/**
+ * @brief Wi-Fiのイベント・ハンドラ
+ * @param[in] ctx コンテキスト
+ * @param[in] event イベントの情報
+ * @return イベントの処理結果。成功したらESP_OK
+ */
 static esp_err_t wifi_event_handler(void* ctx, system_event_t* event)
 {
 	switch (event->event_id)
 	{
 	case SYSTEM_EVENT_STA_GOT_IP: {
-		event_wifi_got_ip->set();
+		// アクセス・ポイントに接続してIPアドレスが割り当てられた
+		event_wifi_got_ip->set();	// メイン・スレッドに通知
 		break;
 	}
 	default:
@@ -286,6 +308,7 @@ static esp_err_t wifi_event_handler(void* ctx, system_event_t* event)
 	}
 	return ESP_OK;
 }
+
 
 static void initialize_wifi()
 {
@@ -320,8 +343,8 @@ Lazy<freertos::WaitQueue<SensorData, 8>> sensor_data_queue;
 static void main_task(void* param) {
 	ESP_LOGI(TAG, "Initializing ESP Bluedroid...");
 
+	// ESP32のBLEコントローラを初期化する
 	esp_bt_controller_config_t bt_cfg = BT_CONTROLLER_INIT_CONFIG_DEFAULT();
-
 	ESP_ERROR_CHECK(esp_bt_controller_mem_release(ESP_BT_MODE_CLASSIC_BT));
 	ESP_ERROR_CHECK(esp_bt_controller_init(&bt_cfg));
 	ESP_ERROR_CHECK(esp_bt_controller_enable(ESP_BT_MODE_BLE) != ESP_OK);
@@ -338,7 +361,7 @@ static void main_task(void* param) {
 
 	bool is_device_address_stored = load_target_device_address();
 	if( is_device_address_stored ) {
-		// 接続先デバイス・アドレスが保存されているので、接続する。
+		// 接続先デバイス・アドレスが保存されているので、接続する。sssssss
 		connect_device(false);
 	}
 	else {
@@ -365,6 +388,7 @@ static void main_task(void* param) {
 		store_target_device_address();
 	}
 
+	// HumidityConfigurationに0x01を書き込んでSensorTagの温湿度センサの測定を有効にする
 	{
 		ESP_LOGI(TAG, "Writing Configuration characteristic");
 		auto characteristic = temperature_service.get_characteristic(HumidityConfigurationCharacteristicUuid);
@@ -372,6 +396,7 @@ static void main_task(void* param) {
 		auto result = characteristic.write_value_async(&value, 1).get();
 		ESP_LOGI(TAG, "Writing value complete. status=%x", result);
 	}
+	// HumidityPeriodを設定して2000[ms]ごとに温湿度センサを測定するようにする
 	{
 		ESP_LOGI(TAG, "Writing Period characteristic");
 		auto characteristic = temperature_service.get_characteristic(HumidityPeriodCharacteristicUuid);
@@ -380,15 +405,18 @@ static void main_task(void* param) {
 		ESP_LOGI(TAG, "Writing value complete. status=%x", result);
 	}
 
+	// Batteryサービス周りの処理
 	volatile uint8_t battery_level = 0;
 	GattClientCharacteristic battery_characteristic = battery_service.get_characteristic(BatteryLevelCharacteristicUuid);
 	if( battery_service ) {
+		// BatteryLevelキャラクタリスティックのノティフィケーションを有効にする
 		ESP_LOGI(TAG, "Enable battery level notification.");
 		battery_characteristic.set_notification_handler([&battery_level](const uint8_t* data, std::size_t length) {
 			if( length > 0 ) {
 				battery_level = *data;
 			}
 		});
+		// BatteryLevelキャラクタリスティックの値を読み取った時のハンドラを設定
 		battery_characteristic.set_value_read_handler([&battery_level](esp_gatt_status_t status, const uint8_t* data, std::size_t length) {
 			if( length > 0 ) {
 				battery_level = *data;
@@ -401,16 +429,21 @@ static void main_task(void* param) {
 		result = descriptor.write_value_async(value, sizeof(value)).get();
 		ESP_LOGI(TAG, "Descriptor configured. status=%x", result);
 
+		// 最初に1度現在の値を読み取っておく
 		battery_characteristic.begin_read_value();
 	}
 
+	// HumidityDataキャラクタリスティックのノティフィケーションを有効にする
 	GattClientCharacteristic temperature_characteristic = temperature_service.get_characteristic(HumidityDataCharacteristicUuid);
 	{
+		// センサ・データを蓄えるキューを初期化する
 		sensor_data_queue.ensure();
-		
+		// ノティフィケーション受信時の処理
 		temperature_characteristic.set_notification_handler([](const uint8_t* data, std::size_t length) {
 			ESP_LOGI(TAG, "Notification. length=0x%x", length);
 			if (length == 4) {
+				// HDC1000のデータがそのまま送られてくるので、HDC1000の仕様をもとに
+				// 温度と湿度を取り出して、それぞれ℃と%単位に変換する
 				int16_t raw_temp = static_cast<int16_t>(data[0] | (data[1] << 8));
 				uint16_t raw_hum = data[2] | (data[3] << 8);
 				SensorData data;
@@ -418,33 +451,34 @@ static void main_task(void* param) {
 				data.humidity = raw_hum / 65536.0f * 100.0f;
 
 				ESP_LOGI(TAG, "handler: temp:%f, hum:%f", data.temperature, data.humidity);
+				// センサ・データのキューに追加する
 				sensor_data_queue->send(data);
 			}
 		});
+		// ノティフィケーションの受信を有効にする
 		auto result = temperature_characteristic.enable_notification_async(true).get();
 		ESP_LOGI(TAG, "Notification enabled. status=%x", result);
-
+		// CCCDに0x0001を書き込んでSensorTag側のノティフィケーション送信を有効にする
 		auto descriptor = temperature_characteristic.get_descriptor(NotificationDescriptorUuid);
 		uint8_t value[2] = { 0x01, 0x00 };
 		result = descriptor.write_value_async(value, sizeof(value)).get();
 		ESP_LOGI(TAG, "Descriptor configured. status=%x", result);
 	}
 	{
-		// 接続パラメータを更新する。
+		// SensorTagの消費電力を抑えるため、接続パラメータを更新する。
 		esp_ble_conn_update_params_t conn_params = {0};
 		memcpy(conn_params.bda, target_bdaddr, sizeof(esp_bd_addr_t));
-		conn_params.min_int = static_cast<uint16_t>(500.0/1.25);
-		conn_params.max_int = static_cast<uint16_t>(2000.0/1.25);
+		conn_params.min_int = static_cast<uint16_t>(500.0/1.25);	// 最小コネクション・インターバル=500[ms]
+		conn_params.max_int = static_cast<uint16_t>(2000.0/1.25);	// 最大コネクション・インターバル=2000[ms]
 		conn_params.latency = 0;
-		conn_params.timeout = static_cast<uint16_t>(20000.0/10.0);
-		
+		conn_params.timeout = static_cast<uint16_t>(20000.0/10.0);	// タイムアウト=20000[ms]=20[s]
+
 		auto err = esp_ble_gap_update_conn_params(&conn_params);
 		if( err != ESP_OK ) {
 			ESP_LOGE(TAG, "Failed to update connection parameters - %d", err);
 		}
 	}
 	{
-
 		vector<char> payload;
 		payload.reserve(256);
 
